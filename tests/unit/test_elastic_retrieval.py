@@ -11,6 +11,7 @@ from worker.elastic import (
     ElasticUnavailable,
     ensure_indices,
     index_source_paragraphs,
+    probe_rerank_inference_id,
 )
 from worker.retrieval import (
     RetrievedParagraph,
@@ -142,3 +143,17 @@ async def test_wrong_dimension_is_an_optional_indexing_failure() -> None:
 
     with pytest.raises(ElasticUnavailable):
         await index_source_paragraphs(client, source, [paragraph], embeddings_by_para={1: [1.0]})
+
+
+@pytest.mark.asyncio
+async def test_rerank_probe_accepts_async_client_response_wrapper() -> None:
+    class Inference:
+        async def get(self, *, task_type: str) -> SimpleNamespace:
+            assert task_type == "rerank"
+            return SimpleNamespace(
+                body={"endpoints": [{"inference_id": "managed-reranker", "task_type": "rerank"}]}
+            )
+
+    client = SimpleNamespace(inference=Inference())
+
+    assert await probe_rerank_inference_id(client) == "managed-reranker"

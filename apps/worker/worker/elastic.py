@@ -62,7 +62,11 @@ async def probe_rerank_inference_id(client: Any) -> str | None:
         response = await client.inference.get(task_type="rerank")
     except Exception:
         return None
-    endpoints = response.get("endpoints", []) if isinstance(response, Mapping) else []
+    # The async client returns an ``ObjectApiResponse`` in production, while
+    # the lightweight fakes used in unit tests are plain mappings.  Treat
+    # both forms alike so a valid managed endpoint is not silently skipped.
+    body = _response_body_or_none(response)
+    endpoints = body.get("endpoints", []) if body is not None else []
     for endpoint in endpoints if isinstance(endpoints, list) else []:
         if not isinstance(endpoint, Mapping):
             continue
@@ -70,6 +74,13 @@ async def probe_rerank_inference_id(client: Any) -> str | None:
         if isinstance(identifier, str) and identifier:
             return identifier
     return None
+
+
+def _response_body_or_none(response: Any) -> Mapping[str, Any] | None:
+    if isinstance(response, Mapping):
+        return response
+    body = getattr(response, "body", None)
+    return body if isinstance(body, Mapping) else None
 
 
 async def _ensure_index(client: Any, index: str, mappings: dict[str, Any]) -> None:
