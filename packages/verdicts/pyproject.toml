@@ -3,7 +3,9 @@ name = "pincite-verdicts"
 version = "0.1.0"
 requires-python = ">=3.12"
 description = "Verdict rules as pure functions (SPEC.md §6). Empty in P0 — populated starting P1/P2."
-dependencies = []
+dependencies = [
+    "pyyaml>=6.0",
+]
 
 [build-system]
 requires = ["hatchling"]
