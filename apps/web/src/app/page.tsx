@@ -34,6 +34,7 @@ type Citation = {
   court_hint: string | null;
   year_hint: number | null;
   resolution_state: string | null;
+  source_state: "queued" | "fetching" | "fetched" | "unavailable" | null;
   claims: Claim[];
   findings: Finding[];
 };
@@ -228,7 +229,13 @@ export default function Home() {
     setSource(null);
 
     if (!sourceId) {
-      setSourceStatus("This citation has no completed source evidence yet. Its result will appear here as checking finishes.");
+      if (citation.source_state === "queued" || citation.source_state === "fetching") {
+        setSourceStatus("Authority verified; source text loading.");
+      } else if (citation.source_state === "unavailable") {
+        setSourceStatus("Authority verified, but source text was unavailable for quote comparison.");
+      } else {
+        setSourceStatus("This citation has no completed source evidence yet. Its result will appear here as checking finishes.");
+      }
       return;
     }
 

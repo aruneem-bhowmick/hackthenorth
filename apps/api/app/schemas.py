@@ -76,6 +76,7 @@ class CitationResponse(BaseModel):
     court_hint: str | None
     year_hint: int | None
     resolution_state: str | None
+    source_state: str | None
     claims: list[ClaimResponse] = Field(default_factory=list)
     findings: list[FindingResponse] = Field(default_factory=list)
 

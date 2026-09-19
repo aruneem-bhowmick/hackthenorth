@@ -79,6 +79,9 @@ class Citation(Base):
     court_hint: Mapped[str | None] = mapped_column(String(256), nullable=True)
     year_hint: Mapped[int | None] = mapped_column(Integer, nullable=True)
     resolution_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_acquisition_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("source_acquisitions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     job: Mapped[Job] = relationship(back_populates="citations")
     claims: Mapped[list["Claim"]] = relationship(
@@ -87,6 +90,7 @@ class Citation(Base):
     findings: Mapped[list["Finding"]] = relationship(
         back_populates="citation", cascade="all, delete-orphan", passive_deletes=True
     )
+    source_acquisition: Mapped["SourceAcquisition | None"] = relationship(back_populates="citations")
 
 
 class Claim(Base):
@@ -139,6 +143,23 @@ class SourceParagraph(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
 
     source: Mapped[Source] = relationship(back_populates="paragraphs")
+
+
+class SourceAcquisition(Base):
+    __tablename__ = "source_acquisitions"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    cluster_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
+    source_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("sources.id", ondelete="SET NULL"), nullable=True
+    )
+    source_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    retrieved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    citations: Mapped[list[Citation]] = relationship(back_populates="source_acquisition")
 
 
 class LookupCache(Base):

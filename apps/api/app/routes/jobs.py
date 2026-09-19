@@ -125,7 +125,11 @@ async def get_job_citations(
     result = await session.execute(
         select(Citation)
         .where(Citation.job_id == job_id)
-        .options(selectinload(Citation.claims), selectinload(Citation.findings))
+        .options(
+            selectinload(Citation.claims),
+            selectinload(Citation.findings),
+            selectinload(Citation.source_acquisition),
+        )
         .order_by(Citation.page.nulls_last(), Citation.start_offset.nulls_last(), Citation.id)
     )
     citations = result.scalars().unique().all()
@@ -236,6 +240,7 @@ def _to_citation_response(citation: Citation) -> CitationResponse:
         court_hint=citation.court_hint,
         year_hint=citation.year_hint,
         resolution_state=citation.resolution_state,
+        source_state=citation.source_acquisition.state if citation.source_acquisition else None,
         claims=[
             ClaimResponse(
                 id=claim.id,
