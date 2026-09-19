@@ -3,7 +3,10 @@ name = "pincite-pipeline"
 version = "0.1.0"
 requires-python = ">=3.12"
 description = "Ingestion, extraction, resolution, and checks (SPEC.md FR-ING/FR-EXT/FR-RES/FR-QTE/FR-PRP/FR-OPP). Empty in P0 — populated starting P1."
-dependencies = []
+dependencies = [
+    "eyecite>=2.6",
+    "pypdf>=5.0",
+]
 
 [build-system]
 requires = ["hatchling"]
