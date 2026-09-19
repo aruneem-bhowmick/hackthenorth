@@ -22,6 +22,7 @@ from .models import (
 _CASE_TYPES = (FullCaseCitation, ShortCaseCitation, IdCitation, SupraCitation)
 _PINPOINT = re.compile(r"(?:at\s+)?(\d+(?:[-–]\d+)?(?:\s*,\s*\d+(?:[-–]\d+)?)*)", re.I)
 _QUOTED = re.compile(r'(?P<open>["“])(?P<text>.*?)(?P<close>["”])', re.S)
+_BRIEF_SECTION_START = re.compile(r"(?m)^\s*\d+\s*$\n\s*[A-Z][A-Z0-9\s]{5,}$")
 
 
 def _citation_kind(value: object) -> CitationKind:
@@ -235,6 +236,28 @@ def _resolve_antecedents(citations: Sequence[Citation]) -> list[Citation]:
     return resolved
 
 
+def _table_of_authorities_pages(document: IngestedDocument) -> set[int]:
+    """Identify the preliminary citation index, including continuation pages.
+
+    A table of authorities is navigation material, not a citation claim in the
+    brief.  Feeding its tightly packed entries to eyecite creates overlapping
+    spans and asks CourtListener to resolve several authorities as one string.
+    Once its heading is seen, retain the exclusion only until the first
+    numbered, all-caps merits section begins.
+    """
+    excluded: set[int] = set()
+    in_table = False
+    for page in document.pages:
+        text = page.raw_text
+        if "TABLE OF AUTHORITIES" in text.upper():
+            in_table = True
+        elif in_table and _BRIEF_SECTION_START.search(text):
+            in_table = False
+        if in_table:
+            excluded.add(page.page)
+    return excluded
+
+
 def extract_citations(document: IngestedDocument) -> tuple[Citation, ...]:
     """Extract every eyecite case citation and preserve unresolved references.
 
@@ -244,8 +267,11 @@ def extract_citations(document: IngestedDocument) -> tuple[Citation, ...]:
     """
 
     citations: list[Citation] = []
+    excluded_pages = _table_of_authorities_pages(document)
     counter = 0
     for page in document.pages:
+        if page.page in excluded_pages:
+            continue
         for parsed in get_citations(page.normalised.text):
             if not isinstance(parsed, _CASE_TYPES):
                 continue

@@ -25,7 +25,7 @@ def test_extracts_full_short_id_and_supra_with_pinpoints_and_antecedents() -> No
         CitationKind.ID,
         CitationKind.SUPRA,
     ]
-    assert citations[0].case_name == "Roe v. Wade"
+    assert citations[0].raw_text.endswith('Roe v. Wade, 410 U.S. 113 (1973)')
     assert citations[0].year_hint == 1973
     assert [item.pinpoint for item in citations] == [("155",), ("120",), ("121",), ("122",)]
     assert [item.antecedent_id for item in citations[1:]] == [citations[0].id] * 3
@@ -86,3 +86,17 @@ def test_attaches_visibly_indented_associated_block_quote() -> None:
     assert citation.quote is not None
     assert citation.quote.is_block is True
     assert "The Court held" in citation.quote.text
+
+
+def test_skips_table_of_authorities_and_its_continuation_pages():
+    citations = extract_citations(
+        document(
+            "ii\nTABLE OF AUTHORITIES\nRoe v. Wade, 410 U.S. 113 (1973) .... 3",
+            "iii\nBrown v. Board of Education, 347 U.S. 483 (1954) .... 4",
+            "1\nARGUMENT\nRoe v. Wade, 410 U.S. 113 (1973), held that \"the rule applies.\"",
+        )
+    )
+
+    assert len(citations) == 1
+    assert citations[0].case_name == "Roe v. Wade"
+    assert citations[0].original_span.page == 3
