@@ -263,6 +263,9 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [checkFilter, setCheckFilter] = useState<CheckFilter>("all");
   const [toneFilter, setToneFilter] = useState<ToneFilter>("all");
+  const [showStartPanel, setShowStartPanel] = useState(true);
+  const [showTools, setShowTools] = useState(false);
+  const [reviewView, setReviewView] = useState<"findings" | "brief">("findings");
   const eventSource = useRef<EventSource | null>(null);
   const signalRefreshTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const sourcePane = useRef<HTMLDivElement | null>(null);
@@ -294,7 +297,10 @@ export default function Home() {
     const nextCitations = data.citations.map((citation) => ({ ...citation, signals: citation.signals ?? [] }));
     setCitations(nextCitations);
     setPageSignals(data.page_signals ?? []);
-    setSelectedCitationId((current) => current ?? nextCitations[0]?.id ?? null);
+    // Keep an explicitly selected citation across polling, but do not open
+    // source evidence until the reviewer asks for it. This avoids presenting
+    // an incomplete evidence pane as if it were a completed result.
+    setSelectedCitationId((current) => current && nextCitations.some((citation) => citation.id === current) ? current : null);
   }
 
   async function refreshBriefPages(activeJobId: string, reviewToken: string) {
@@ -439,6 +445,9 @@ export default function Home() {
       const data = (await response.json()) as { job_id: string; review_token: string };
       setJobId(data.job_id);
       setJobStatus("Brief uploaded — preparing review.");
+      setShowStartPanel(false);
+      setShowTools(false);
+      setReviewView("findings");
       connectEvents(data.job_id, data.review_token);
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "The upload could not be completed.");
@@ -448,6 +457,15 @@ export default function Home() {
 
   const diff = readDiff(selectedQuoteFinding);
   const propositionParagraphIds = selectedPropositionFinding ? citedParagraphIdsFrom([selectedPropositionFinding]) : [];
+  const hasReview = jobId !== null;
+  const hasResults = citations.length > 0;
+
+  function openNewReview() {
+    if (briefUrl) URL.revokeObjectURL(briefUrl);
+    setFile(null);
+    setBriefUrl(null);
+    setShowStartPanel(true);
+  }
 
   return (
     <main className={styles.page}>
@@ -462,7 +480,7 @@ export default function Home() {
         </div>
       </header>
 
-      <section className={styles.uploadCard} aria-labelledby="upload-heading">
+      {showStartPanel ? <section className={styles.uploadCard} aria-labelledby="upload-heading">
         <div>
           <h2 id="upload-heading">Start a brief review</h2>
           <p>Upload a federal brief. PinCite will identify citations and show the source material it checked.</p>
@@ -487,38 +505,63 @@ export default function Home() {
           <button className={styles.primaryButton} disabled={!file} type="submit">Review citations</button>
         </form>
         {error && <p className={styles.error} role="alert">{error}</p>}
-      </section>
+      </section> : <section className={styles.reviewHeader} aria-label="Current review">
+        <div>
+          <p className={styles.eyebrow}>Current review</p>
+          <h2>{file?.name ?? "Uploaded PDF"}</h2>
+        </div>
+        <button className={styles.secondaryButton} onClick={openNewReview} type="button">Start another review</button>
+      </section>}
 
-      <section className={styles.statusBar} aria-live="polite">
+      {hasReview && <section className={styles.statusBar} aria-live="polite">
         <span className={styles.statusDot} aria-hidden="true" />
         <span>{jobStatus}</span>
-        {jobId && <code>Review {jobId.slice(0, 8)}</code>}
-      </section>
+        <code>Review {jobId.slice(0, 8)}</code>
+      </section>}
 
-      <section className={styles.p4Tools}>
-        <SummaryPanel
-          checkFilter={checkFilter}
-          citations={citations}
-          labelForVerdict={(verdict) => verdictDetails(verdict).label}
-          onCheckFilter={setCheckFilter}
-          onToneFilter={setToneFilter}
-          toneFilter={toneFilter}
-          toneForVerdict={(verdict) => verdictDetails(verdict).tone}
-        />
-        <ExportButtons apiBase={API_BASE} jobId={jobId} onError={setError} />
-      </section>
+      {hasReview && !hasResults && <section className={styles.processingCard} aria-live="polite">
+        <p className={styles.eyebrow}>Review in progress</p>
+        <h2>Results will appear as they are ready.</h2>
+        <p>PinCite is extracting citations and checking sources. The review workspace opens when the first citation is available.</p>
+      </section>}
 
-      <section className={styles.reviewGrid} aria-label="Citation review">
+      {hasReview && hasResults && <>
+        <section className={styles.workspaceHeader} aria-label="Review navigation">
+          <div>
+            <p className={styles.eyebrow}>Review workspace</p>
+            <h2>{citations.length} citation{citations.length === 1 ? "" : "s"} ready to review</h2>
+          </div>
+          <div className={styles.workspaceActions}>
+            <button aria-pressed={reviewView === "findings"} className={styles.viewButton} onClick={() => setReviewView("findings")} type="button">Findings</button>
+            <button aria-pressed={reviewView === "brief"} className={styles.viewButton} onClick={() => setReviewView("brief")} type="button">Annotated brief</button>
+            <button aria-expanded={showTools} className={styles.secondaryButton} onClick={() => setShowTools((current) => !current)} type="button">{showTools ? "Hide tools" : "Filters & exports"}</button>
+          </div>
+        </section>
+
+        {showTools && <section className={styles.p4Tools}>
+          <SummaryPanel
+            checkFilter={checkFilter}
+            citations={citations}
+            labelForVerdict={(verdict) => verdictDetails(verdict).label}
+            onCheckFilter={setCheckFilter}
+            onToneFilter={setToneFilter}
+            toneFilter={toneFilter}
+            toneForVerdict={(verdict) => verdictDetails(verdict).tone}
+          />
+          <ExportButtons apiBase={API_BASE} jobId={jobId} onError={setError} />
+        </section>}
+
+        <section className={`${styles.reviewGrid} ${selectedCitation ? styles.reviewGridWithEvidence : styles.reviewGridSingle}`} aria-label="Citation review">
         <article className={styles.briefPane}>
           <div className={styles.paneHeader}>
             <div>
-              <p className={styles.eyebrow}>Your brief</p>
-              <h2>{file?.name ?? "Upload a brief to begin"}</h2>
+              <p className={styles.eyebrow}>{reviewView === "findings" ? "Findings" : "Your brief"}</p>
+              <h2>{reviewView === "findings" ? "Choose a citation to inspect its evidence" : file?.name ?? "Uploaded PDF"}</h2>
             </div>
             <span>{citations.length} citation{citations.length === 1 ? "" : "s"}</span>
           </div>
 
-          {briefPages.length ? <div className={styles.annotatedBrief}>
+          {reviewView === "brief" && briefPages.length ? <div className={styles.annotatedBrief}>
             {briefPages.map((page) => <AnnotatedPage
               citationsById={citationsById}
               key={page.page}
@@ -527,9 +570,9 @@ export default function Home() {
               signals={pageSignals.filter((signal) => signal.section_ref === String(page.page) || signal.section_ref === `page:${page.page}`)}
               selectedCitationId={selectedCitationId}
             />)}
-          </div> : <p className={styles.emptyState}>{file ? "Extracting reviewable text and citation spans…" : "Upload a brief to view its annotated text."}</p>}
+          </div> : reviewView === "brief" ? <p className={styles.emptyState}>Extracting reviewable text and citation spans…</p> : null}
 
-          <div className={styles.citationList} aria-label="Extracted citations">
+          {reviewView === "findings" && <div className={styles.citationList} aria-label="Extracted citations">
             {filteredCitations.map((citation) => {
               const selected = citation.id === selectedCitationId;
               const tone = worstTone(citation.findings);
@@ -553,10 +596,10 @@ export default function Home() {
             })}
             {jobId && citations.length === 0 && <p className={styles.emptyState}>Looking for citations. Results will appear individually as they are saved.</p>}
             {citations.length > 0 && filteredCitations.length === 0 && <p className={styles.emptyState}>No citations match these filters.</p>}
-          </div>
+          </div>}
         </article>
 
-        <article className={styles.sourcePane} ref={sourcePane}>
+        {selectedCitation && <article className={styles.sourcePane} ref={sourcePane}>
           <div className={styles.paneHeader}>
             <div>
               <p className={styles.eyebrow}>Source evidence</p>
@@ -565,9 +608,7 @@ export default function Home() {
             {source?.court && <span>{source.court}</span>}
           </div>
 
-          {!selectedCitation && <p className={styles.emptyState}>{sourceStatus}</p>}
-          {selectedCitation && (
-            <>
+          <>
               <section className={styles.citationContext} aria-label="Selected citation">
                 <p><strong>Citation:</strong> {selectedCitation.raw_text}</p>
                 {selectedCitation.claims[0]?.proposition_text && <p><strong>Point checked:</strong> {selectedCitation.claims[0].proposition_text}</p>}
@@ -629,10 +670,11 @@ export default function Home() {
                 </p>)}
                 {!source.paragraphs.length && source.text && <p>{source.text}</p>}
               </div>}
-            </>
-          )}
+          </>
         </article>
-      </section>
+        }
+        </section>
+      </>}
     </main>
   );
 }
