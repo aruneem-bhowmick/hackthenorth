@@ -64,7 +64,9 @@ services:
       REDIS_URL: redis://redis:6379/0
       UPLOADS_DIR: /data/uploads
     volumes:
-      - ./apps/worker:/app
+      - ./apps/worker:/app/apps/worker
+      - ./packages/pipeline:/app/packages/pipeline
+      - ./packages/verdicts:/app/packages/verdicts
       - uploads_data:/data/uploads
     depends_on:
       postgres:

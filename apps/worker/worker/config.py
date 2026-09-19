@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     sentry_dsn_worker: str | None = None
     sentry_environment: str = "development"
+    courtlistener_api_token: str | None = None
 
 
 @lru_cache

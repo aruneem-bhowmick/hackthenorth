@@ -7,7 +7,7 @@ import sentry_sdk
 from arq.connections import RedisSettings
 
 from worker.config import get_settings
-from worker.tasks import process_job
+from worker.tasks import process_citation, process_job
 
 _settings = get_settings()
 
@@ -21,5 +21,5 @@ if _settings.sentry_dsn_worker:
 
 
 class WorkerSettings:
-    functions = [process_job]
+    functions = [process_job, process_citation]
     redis_settings = RedisSettings.from_dsn(_settings.redis_url)

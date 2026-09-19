@@ -14,7 +14,14 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
     UV_LINK_MODE=copy
 
 WORKDIR /app
-COPY apps/worker .
+# P1 uses the shared pipeline and verdict packages. Install this workspace from
+# the root lockfile rather than creating an isolated worker environment that
+# cannot resolve those internal packages.
+COPY pyproject.toml uv.lock ./
+COPY apps/worker ./apps/worker
+COPY packages/pipeline ./packages/pipeline
+COPY packages/verdicts ./packages/verdicts
+WORKDIR /app/apps/worker
 RUN uv sync --no-dev
 
 CMD ["uv", "run", "arq", "worker.settings.WorkerSettings", "--watch", "."]
