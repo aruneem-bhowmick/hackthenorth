@@ -25,7 +25,7 @@ def test_extracts_full_short_id_and_supra_with_pinpoints_and_antecedents() -> No
         CitationKind.ID,
         CitationKind.SUPRA,
     ]
-    assert citations[0].raw_text.endswith('Roe v. Wade, 410 U.S. 113 (1973)')
+    assert citations[0].case_name == "Roe v. Wade"
     assert citations[0].year_hint == 1973
     assert [item.pinpoint for item in citations] == [("155",), ("120",), ("121",), ("122",)]
     assert [item.antecedent_id for item in citations[1:]] == [citations[0].id] * 3
@@ -98,5 +98,5 @@ def test_skips_table_of_authorities_and_its_continuation_pages():
     )
 
     assert len(citations) == 1
-    assert citations[0].case_name == "Roe v. Wade"
+    assert citations[0].raw_text.endswith('Roe v. Wade, 410 U.S. 113 (1973)')
     assert citations[0].original_span.page == 3
