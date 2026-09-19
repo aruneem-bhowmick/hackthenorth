@@ -24,4 +24,7 @@ class WorkerSettings:
     functions = [process_job, process_citation]
     redis_settings = RedisSettings.from_dsn(_settings.redis_url)
     max_jobs = 30
-    job_timeout = 90
+    # Keep the default five-minute per-citation timeout.  The P1 latency target
+    # is monitored at the job level; turning it into a 90-second hard kill
+    # causes slow upstream lookups to retry and congest the queue.
+    max_tries = 2
