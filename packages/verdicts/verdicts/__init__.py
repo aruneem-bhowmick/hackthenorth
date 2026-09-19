@@ -424,7 +424,10 @@ def _segment_candidates(segment: list[_PatternToken], source: list[_Token]) -> l
 
 
 def _best_local_candidate(pattern: list[_PatternToken], source: list[_Token]) -> _Candidate | None:
-    return _segment_candidates(pattern, source)[0] if source and pattern else None
+    if not source or not pattern:
+        return None
+    candidates = _segment_candidates(pattern, source)
+    return candidates[0] if candidates else None
 
 
 def _flatten(segments: list[list[_PatternToken]]) -> list[_PatternToken]:

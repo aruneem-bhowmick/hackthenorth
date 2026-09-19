@@ -132,3 +132,12 @@ def test_source_unavailable_has_no_red_verdict():
     checked = result("A quote", SourceParagraph("empty", ""))
 
     assert checked.verdict is QuoteVerdict.SOURCE_UNAVAILABLE
+
+
+def test_quote_longer_than_a_short_source_paragraph_is_not_an_engine_error():
+    checked = result(
+        "This quotation is substantially longer than the source paragraph.",
+        SourceParagraph("short", "Very short."),
+    )
+
+    assert checked.verdict is QuoteVerdict.NOT_FOUND_IN_SOURCE
