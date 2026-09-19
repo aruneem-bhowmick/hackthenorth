@@ -38,6 +38,7 @@ replays, or profiles.
    Individual reads were about 2 ms, so this was not a user-visible incident
    in the observed run, but the cost grows with citation count.
    **Action / outcome:** Batch-load claims for the affected citation IDs into
-   a map before proposition persistence, then verify a comparable deployed
-   trace no longer triggers the detector. No suppression or production change
-   has been made yet.
+   a map before proposition persistence. The remediation is deployed in
+   `ef64013` (Railway deployment `ffe3b6dc-81a6-48b6-a37e-ce9e3febf004`);
+   a comparable post-fix Sentry trace still must confirm that the detector no
+   longer triggers. No detector suppression was added.
