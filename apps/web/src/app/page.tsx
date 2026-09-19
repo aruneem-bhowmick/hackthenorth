@@ -247,12 +247,35 @@ function AnnotatedPage({
   </section>;
 }
 
+const FUN_LOADING_MESSAGES = [
+  "Herding runaway footnotes…",
+  "Untangling a string cite or two…",
+  "Giving Westlaw a run for its money…",
+  "Chasing down every pin cite…",
+  "Politely interrogating case law…",
+  "Sniffing out shaky authority…",
+];
+const LAW_LOADING_MESSAGES = [
+  "Verifying citations against primary sources…",
+  "Cross-checking quoted language…",
+  "Confirming case names and reporters…",
+  "Validating pin cites against the source…",
+  "Checking each proposition against precedent…",
+  "Reviewing supporting authority…",
+];
+const LOADING_MESSAGES = FUN_LOADING_MESSAGES.flatMap((fun, index) => [fun, LAW_LOADING_MESSAGES[index]]);
+
 export default function Home() {
-  const [mode, setMode] = useState<Mode>("before_filing");
+  const [mode, setMode] = useState<Mode | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [briefUrl, setBriefUrl] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
+  const [reviewToken, setReviewToken] = useState<string | null>(null);
   const [jobStatus, setJobStatus] = useState("Ready for a PDF");
+  const [loadingMessageIndex, setLoadingMessageIndex] = useState(0);
+  const [findingsRevealed, setFindingsRevealed] = useState(false);
+  const [annotatedPdfUrl, setAnnotatedPdfUrl] = useState<string | null>(null);
+  const [annotatedPdfLoading, setAnnotatedPdfLoading] = useState(false);
   const [citations, setCitations] = useState<Citation[]>([]);
   const [briefPages, setBriefPages] = useState<BriefPage[]>([]);
   const [pageSignals, setPageSignals] = useState<Signal[]>([]);
@@ -290,6 +313,18 @@ export default function Home() {
       if (briefUrl) URL.revokeObjectURL(briefUrl);
     };
   }, [briefUrl]);
+
+  useEffect(() => {
+    if (!jobId || citations.length > 0) return;
+    const timer = setInterval(() => setLoadingMessageIndex((index) => (index + 1) % LOADING_MESSAGES.length), 5_000);
+    return () => clearInterval(timer);
+  }, [jobId, citations.length]);
+
+  useEffect(() => {
+    return () => {
+      if (annotatedPdfUrl) URL.revokeObjectURL(annotatedPdfUrl);
+    };
+  }, [annotatedPdfUrl]);
 
   async function refreshCitations(activeJobId: string) {
     const response = await fetch(`${API_BASE}/api/jobs/${activeJobId}/citations`);
@@ -422,7 +457,7 @@ export default function Home() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!file) {
+    if (!file || !mode) {
       setError("Choose a PDF before starting the review.");
       return;
     }
@@ -436,6 +471,10 @@ export default function Home() {
     setActiveParagraphIds(new Set());
     setSourceStatus("Citations will appear here as they are extracted.");
     setJobStatus("Uploading brief…");
+    setLoadingMessageIndex(0);
+    setFindingsRevealed(false);
+    if (annotatedPdfUrl) URL.revokeObjectURL(annotatedPdfUrl);
+    setAnnotatedPdfUrl(null);
 
     const body = new FormData();
     body.append("file", file);
@@ -445,6 +484,7 @@ export default function Home() {
       if (!response.ok) throw new Error(`Upload failed (HTTP ${response.status}).`);
       const data = (await response.json()) as { job_id: string; review_token: string };
       setJobId(data.job_id);
+      setReviewToken(data.review_token);
       setJobStatus("Brief uploaded — preparing review.");
       setShowStartPanel(false);
       setShowTools(false);
@@ -456,59 +496,97 @@ export default function Home() {
     }
   }
 
+  async function openAnnotatedPdf() {
+    if (!jobId || !reviewToken) return;
+    setAnnotatedPdfLoading(true);
+    setError(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/jobs/${jobId}/annotated-brief.pdf`, {
+        headers: { "X-Pincite-Review-Token": reviewToken },
+      });
+      if (!response.ok) throw new Error(`Annotated PDF could not be generated (HTTP ${response.status}).`);
+      const blob = await response.blob();
+      if (annotatedPdfUrl) URL.revokeObjectURL(annotatedPdfUrl);
+      setAnnotatedPdfUrl(URL.createObjectURL(blob));
+    } catch (pdfError) {
+      setError(pdfError instanceof Error ? pdfError.message : "The annotated PDF could not be generated.");
+    } finally {
+      setAnnotatedPdfLoading(false);
+    }
+  }
+
+  function closeAnnotatedPdf() {
+    if (annotatedPdfUrl) URL.revokeObjectURL(annotatedPdfUrl);
+    setAnnotatedPdfUrl(null);
+  }
+
   const diff = readDiff(selectedQuoteFinding);
   const propositionParagraphIds = selectedPropositionFinding ? citedParagraphIdsFrom([selectedPropositionFinding]) : [];
   const hasReview = jobId !== null;
   const hasResults = citations.length > 0;
 
   function openNewReview() {
+    eventSource.current?.close();
+    if (signalRefreshTimer.current) clearInterval(signalRefreshTimer.current);
     if (briefUrl) URL.revokeObjectURL(briefUrl);
+    if (annotatedPdfUrl) URL.revokeObjectURL(annotatedPdfUrl);
     setFile(null);
     setBriefUrl(null);
+    setMode(null);
+    setJobId(null);
+    setReviewToken(null);
+    setJobStatus("Ready for a PDF");
+    setCitations([]);
+    setBriefPages([]);
+    setPageSignals([]);
+    setSelectedCitationId(null);
+    setSource(null);
+    setActiveInvestigations({});
+    setActiveParagraphIds(new Set());
+    setSourceStatus("Select a citation to inspect its source.");
+    setError(null);
+    setFindingsRevealed(false);
+    setAnnotatedPdfUrl(null);
     setShowStartPanel(true);
   }
 
   return (
     <main className={styles.page}>
+      <h1 className="srOnly">PinCite — citation review</h1>
       <header className={styles.header}>
-        <div>
-          <div className={styles.brandRow}>
-            <PinIcon size={18} className={styles.brandMark} />
-            <p className={styles.eyebrow}>PinCite · Citation review</p>
-          </div>
-          <h1>Check cited authority against the source text.</h1>
-        </div>
-        <div className={styles.headerLinks}>
+        <Link className={styles.brand} href="/">
+          <PinIcon size={22} className={styles.brandMark} />
+          <span className={styles.brandName}>PinCite</span>
+        </Link>
+        <nav className={styles.headerNav}>
           <Link href="/eval">Evaluation</Link>
-          <p className={styles.disclaimer}>PinCite reports differences between a document and the sources it cites. It is not legal advice and does not assess anyone&apos;s intent. Always review the linked source text yourself.</p>
-        </div>
+        </nav>
       </header>
-
-      {showStartPanel ? <section className={styles.uploadCard} aria-labelledby="upload-heading">
-        <div>
-          <h2 id="upload-heading">Start a brief review</h2>
-          <p>Upload a federal brief. PinCite will identify citations and show the source material it checked.</p>
+      {showStartPanel ? <section className={styles.startScreen} aria-label="Start a review">
+        <div className={styles.startBrand}>
+          <PinIcon size={48} className={styles.brandMark} />
+          <span className={styles.startBrandName}>PinCite</span>
         </div>
-        <form className={styles.form} onSubmit={handleSubmit}>
-          <fieldset className={styles.modeChoices}>
-            <legend>What are you reviewing?</legend>
-            <label className={mode === "before_filing" ? styles.modeSelected : undefined}>
-              <input checked={mode === "before_filing"} name="mode" onChange={() => setMode("before_filing")} type="radio" value="before_filing" />
-              <span>Before you file</span>
-            </label>
-            <label className={mode === "answering_brief" ? styles.modeSelected : undefined}>
-              <input checked={mode === "answering_brief"} name="mode" onChange={() => setMode("answering_brief")} type="radio" value="answering_brief" />
-              <span>Answering a brief</span>
-            </label>
-          </fieldset>
+        <div aria-label="What are you reviewing?" className={styles.modeCards} role="group">
+          <button aria-pressed={mode === "before_filing"} className={styles.modeCard} onClick={() => setMode("before_filing")} type="button">
+            <strong>My Brief</strong>
+            <span>Reviewing something before you file it.</span>
+          </button>
+          <button aria-pressed={mode === "answering_brief"} className={styles.modeCard} onClick={() => setMode("answering_brief")} type="button">
+            <strong>Their Brief</strong>
+            <span>Responding to a brief you&apos;ve received.</span>
+          </button>
+        </div>
+        {mode && <form className={styles.startNext} onSubmit={handleSubmit}>
           <label className={styles.filePicker}>
             <span>PDF brief</span>
             <input accept="application/pdf" onChange={chooseFile} type="file" />
             <strong>{file ? file.name : "Choose a PDF"}</strong>
           </label>
           <button className={styles.primaryButton} disabled={!file} type="submit">Review citations</button>
-        </form>
+        </form>}
         {error && <p className={styles.error} role="alert">{error}</p>}
+        <p className={styles.disclaimer}>PinCite reports differences between a document and the sources it cites. It is not legal advice and does not assess anyone&apos;s intent. Always review the linked source text yourself.</p>
       </section> : <section className={styles.reviewHeader} aria-label="Current review">
         <div>
           <p className={styles.eyebrow}>Current review</p>
@@ -525,11 +603,24 @@ export default function Home() {
 
       {hasReview && !hasResults && <section className={styles.processingCard} aria-live="polite">
         <p className={styles.eyebrow}>Review in progress</p>
-        <h2>Results will appear as they are ready.</h2>
-        <p>PinCite is extracting citations and checking sources. The review workspace opens when the first citation is available.</p>
+        <div className={styles.loadingRow}>
+          <span aria-hidden="true" className={styles.spinner} />
+          <h2>{LOADING_MESSAGES[loadingMessageIndex]}</h2>
+        </div>
+        <p>The review workspace opens when the first citation is available.</p>
       </section>}
 
-      {hasReview && hasResults && <>
+      {hasReview && hasResults && !findingsRevealed && <div className={styles.revealPrompt}>
+        <p className={styles.eyebrow}>Review complete</p>
+        <p className={styles.revealCopy}>{citations.length} citation{citations.length === 1 ? "" : "s"} checked</p>
+        <button aria-label="Show findings" className={styles.revealButton} onClick={() => setFindingsRevealed(true)} type="button">
+          <svg aria-hidden="true" fill="none" height="20" viewBox="0 0 24 24" width="20">
+            <path d="M6 9l6 6 6-6" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+          </svg>
+        </button>
+      </div>}
+
+      {hasReview && hasResults && findingsRevealed && <>
         <section className={styles.workspaceHeader} aria-label="Review navigation">
           <div>
             <p className={styles.eyebrow}>Review workspace</p>
@@ -562,7 +653,11 @@ export default function Home() {
               <p className={styles.eyebrow}>{reviewView === "findings" ? "Findings" : "Your brief"}</p>
               <h2>{reviewView === "findings" ? "Choose a citation to inspect its evidence" : file?.name ?? "Uploaded PDF"}</h2>
             </div>
-            <span>{citations.length} citation{citations.length === 1 ? "" : "s"}</span>
+            {reviewView === "brief" ? (
+              <button className={styles.secondaryButton} disabled={annotatedPdfLoading} onClick={() => void openAnnotatedPdf()} type="button">
+                {annotatedPdfLoading ? "Preparing PDF…" : "View as PDF"}
+              </button>
+            ) : <span>{citations.length} citation{citations.length === 1 ? "" : "s"}</span>}
           </div>
 
           {reviewView === "brief" && briefPages.length ? <div className={styles.annotatedBrief}>
@@ -678,6 +773,14 @@ export default function Home() {
         </article>
         }
         </section>
+
+        {annotatedPdfUrl && <section className={styles.pdfViewer} aria-label="Annotated brief PDF">
+          <div className={styles.paneHeader}>
+            <p className={styles.eyebrow}>Annotated brief PDF</p>
+            <button className={styles.secondaryButton} onClick={closeAnnotatedPdf} type="button">Close</button>
+          </div>
+          <iframe className={styles.pdfFrame} src={annotatedPdfUrl} title="Annotated brief PDF" />
+        </section>}
       </>}
     </main>
   );

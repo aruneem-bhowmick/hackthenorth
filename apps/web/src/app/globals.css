@@ -96,13 +96,14 @@ input[type="checkbox"] {
   to { opacity: 1; }
 }
 
-@keyframes fadeUp {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-@keyframes pulseRing {
-  0% { box-shadow: 0 0 0 0 rgb(232 72 60 / 45%); }
-  70% { box-shadow: 0 0 0 6px rgb(232 72 60 / 0%); }
-  100% { box-shadow: 0 0 0 0 rgb(232 72 60 / 0%); }
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }

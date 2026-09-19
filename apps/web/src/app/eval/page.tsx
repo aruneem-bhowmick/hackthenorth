@@ -48,17 +48,19 @@ export default async function EvaluationPage() {
   const datasetDescription = evaluation?.dataset_description ?? evaluation?.dataset?.description;
 
   return <main className={styles.page}>
+    <h1 className="srOnly">PinCite — evaluation results</h1>
     <header className={styles.header}>
-      <div>
-        <div className={styles.brandRow}>
-          {/* eslint-disable-next-line @next/next/no-img-element -- static mark, server component avoids client-only icon hook */}
-          <img src="/pushpin.svg" alt="" width={18} height={18} className={styles.brandMark} />
-          <p className={styles.eyebrow}>PinCite · Evaluation</p>
-        </div>
-        <h1>Measure the review system against labelled examples.</h1>
-      </div>
-      <Link href="/">Return to review</Link>
+      <Link className={styles.brand} href="/">
+        {/* eslint-disable-next-line @next/next/no-img-element -- static mark, server component avoids client-only icon hook */}
+        <img src="/pushpin.svg" alt="" width={22} height={22} className={styles.brandMark} />
+        <span className={styles.brandName}>PinCite</span>
+      </Link>
+      <nav className={styles.headerNav}>
+        <Link href="/">Return to review</Link>
+      </nav>
     </header>
+    <p className={styles.eyebrow}>Evaluation</p>
+    <h2 className={styles.pageHeading}>Measure the review system against labelled examples.</h2>
 
     <section className={styles.intro}>
       <h2>About this evaluation</h2>

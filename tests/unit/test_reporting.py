@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.reporting import ExportLanguageError, lint_export_text, render_markdown, render_pdf
+from app.reporting import ExportLanguageError, lint_export_text, render_annotated_brief_pdf, render_markdown, render_pdf
 
 
 def _bundle() -> tuple[SimpleNamespace, list[SimpleNamespace], dict[str, SimpleNamespace]]:
@@ -76,5 +76,26 @@ def test_pdf_export_is_a_pdf_and_is_rendered_from_linted_markdown() -> None:
     lint_export_text(report)
 
     rendered = render_pdf(report)
+
+    assert rendered.startswith(b"%PDF")
+
+
+def test_annotated_brief_pdf_is_a_pdf_and_tolerates_missing_offsets() -> None:
+    job, citations, _sources = _bundle()
+    citations.append(SimpleNamespace(page=3, start_offset=None, end_offset=None, findings=[]))
+    pages = [SimpleNamespace(page=3, text="Example v. Example, 1 F.4th 2, is cited here.")]
+
+    rendered = render_annotated_brief_pdf(job, pages, citations)
+
+    assert rendered.startswith(b"%PDF")
+
+
+def test_annotated_brief_pdf_clamps_out_of_range_spans() -> None:
+    job, citations, _sources = _bundle()
+    citations[0].start_offset = 0
+    citations[0].end_offset = 999
+    pages = [SimpleNamespace(page=3, text="short page text")]
+
+    rendered = render_annotated_brief_pdf(job, pages, citations)
 
     assert rendered.startswith(b"%PDF")

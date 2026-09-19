@@ -7,7 +7,7 @@ from pathlib import Path
 
 import sentry_sdk
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +16,7 @@ from sqlalchemy.orm import selectinload
 from app.config import Settings, get_settings
 from app.db import BriefPage, Citation, Finding, Job, JobMode, JobStatus, Signal, default_expiry, get_session
 from app.queue import get_arq_pool
+from app.reporting import render_annotated_brief_pdf
 from app.schemas import (
     CitationResponse,
     CitationSpanResponse,
@@ -178,6 +179,39 @@ async def get_job_pages(
     return BriefPagesResponse(
         job_id=job_id,
         pages=[BriefPageResponse(page=item.page, text=item.text, citations=spans.get(item.page, [])) for item in pages],
+    )
+
+
+@router.get("/{job_id}/annotated-brief.pdf")
+async def get_annotated_brief_pdf(
+    job_id: uuid.UUID,
+    x_pincite_review_token: str | None = Header(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Render the extracted brief as a PDF with verdict-colored citation spans.
+
+    Requires the review token: like ``/pages``, this exposes the reviewer's
+    full brief text, not just excerpted evidence.
+    """
+    job = await session.get(Job, job_id)
+    if job is None:
+        raise HTTPException(404, detail={"error": {"code": "NOT_FOUND", "message": "job not found"}})
+    if not job.review_token_hash or not x_pincite_review_token or not hmac.compare_digest(
+        job.review_token_hash, _token_hash(x_pincite_review_token)
+    ):
+        raise HTTPException(403, detail={"error": {"code": "FORBIDDEN", "message": "review token required"}})
+    pages = list(await session.scalars(select(BriefPage).where(BriefPage.job_id == job_id).order_by(BriefPage.page)))
+    citations = list(
+        await session.scalars(
+            select(Citation).where(Citation.job_id == job_id).options(selectinload(Citation.findings))
+        )
+    )
+    pdf_bytes = render_annotated_brief_pdf(job, pages, citations)
+    filename = f"pincite-annotated-brief-{job_id}.pdf"
+    return Response(
+        pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
     )
 
 
