@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # See apps/api/app/config.py for why this fallback path exists.
@@ -18,6 +19,14 @@ class Settings(BaseSettings):
     sentry_environment: str = "development"
     courtlistener_api_token: str | None = None
     openai_api_key: str | None = None
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def use_asyncpg_driver(cls, value: object) -> object:
+        """Accept Railway's standard PostgreSQL URL without manual rewriting."""
+        if isinstance(value, str) and value.startswith("postgresql://"):
+            return "postgresql+asyncpg://" + value.removeprefix("postgresql://")
+        return value
 
 
 @lru_cache

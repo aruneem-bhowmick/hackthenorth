@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Real process env vars always win (Docker Compose sets those directly); this
@@ -35,6 +36,14 @@ class Settings(BaseSettings):
     gptzero_api_key: str | None = None
 
     job_expiry_hours: int = 24  # NFR-PRIV-001
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def use_asyncpg_driver(cls, value: object) -> object:
+        """Accept Railway's standard PostgreSQL URL without manual rewriting."""
+        if isinstance(value, str) and value.startswith("postgresql://"):
+            return "postgresql+asyncpg://" + value.removeprefix("postgresql://")
+        return value
 
     def cors_origins(self) -> list[str]:
         """Return validated, non-empty CORS origins from deployment settings."""
