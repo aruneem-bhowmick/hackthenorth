@@ -26,10 +26,13 @@ from sqlalchemy.orm import selectinload
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 if str(ROOT / "apps" / "api") not in sys.path:
     sys.path.insert(0, str(ROOT / "apps" / "api"))
 
 from app.db import Citation  # noqa: E402
+from eval.retrieval_ablation import load_retrieval_ablation_fixture, score_retrieval_ablation  # noqa: E402
 
 
 PILOT_DESCRIPTION = (
@@ -222,6 +225,7 @@ async def run_evaluation(
     root: Path = ROOT,
     output: Path | None = None,
     job_references: Mapping[str, str] | None = None,
+    retrieval_ablation: Path | None = None,
 ) -> dict[str, Any]:
     """Read referenced jobs and write aggregate-only results deterministically."""
 
@@ -253,6 +257,8 @@ async def run_evaluation(
     finally:
         await engine.dispose()
     result = score_evaluation(labels, observations_by_brief)
+    if retrieval_ablation is not None:
+        result.update(score_retrieval_ablation(load_retrieval_ablation_fixture(retrieval_ablation)))
     target = output or _default_output(root)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -275,6 +281,11 @@ def main() -> None:
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     parser.add_argument("--output", type=Path)
     parser.add_argument("--job", action="append", default=[], metavar="BRIEF=UUID")
+    parser.add_argument(
+        "--retrieval-ablation",
+        type=Path,
+        help="versioned offline corpus/query fixture; does not query or rerun the pipeline",
+    )
     args = parser.parse_args()
     if not args.database_url:
         parser.error("--database-url or DATABASE_URL is required")
@@ -284,7 +295,14 @@ def main() -> None:
             parser.error("--job must be BRIEF=UUID")
         brief, job_id = item.split("=", 1)
         references[brief.casefold()] = job_id
-    asyncio.run(run_evaluation(args.database_url, output=args.output, job_references=references or None))
+    asyncio.run(
+        run_evaluation(
+            args.database_url,
+            output=args.output,
+            job_references=references or None,
+            retrieval_ablation=args.retrieval_ablation,
+        )
+    )
 
 
 if __name__ == "__main__":
