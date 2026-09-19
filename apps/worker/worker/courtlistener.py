@@ -156,14 +156,15 @@ class CourtListenerClient:
                     client, f"https://www.courtlistener.com/api/rest/v4/clusters/{int(cluster_id)}/"
                 )
                 opinion_urls = cluster_response.get("sub_opinions", [])
-            opinions: list[dict[str, Any]] = []
-            for url in opinion_urls:
-                if not isinstance(url, str) or not url.startswith(
-                    "https://www.courtlistener.com/api/rest/v4/opinions/"
-                ):
-                    continue
-                opinions.append(await self._get_json(client, url))
-            return opinions
+            trusted_urls = [
+                url
+                for url in opinion_urls
+                if isinstance(url, str) and url.startswith("https://www.courtlistener.com/api/rest/v4/opinions/")
+            ]
+            # Opinion parts are independent. Fetch them concurrently so a
+            # multi-opinion cluster cannot serially consume the per-citation
+            # worker budget; each request retains the same bounded retry path.
+            return list(await asyncio.gather(*(self._get_json(client, url) for url in trusted_urls)))
         finally:
             if owns_client:
                 await client.aclose()

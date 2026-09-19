@@ -23,3 +23,5 @@ if _settings.sentry_dsn_worker:
 class WorkerSettings:
     functions = [process_job, process_citation]
     redis_settings = RedisSettings.from_dsn(_settings.redis_url)
+    max_jobs = 30
+    job_timeout = 90
