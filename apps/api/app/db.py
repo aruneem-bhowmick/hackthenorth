@@ -53,9 +53,22 @@ class Job(Base):
         DateTime(timezone=True), nullable=True
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    review_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     citations: Mapped[list["Citation"]] = relationship(
         back_populates="job", cascade="all, delete-orphan", passive_deletes=True
     )
+    pages: Mapped[list["BriefPage"]] = relationship(back_populates="job", cascade="all, delete-orphan", passive_deletes=True)
+
+
+class BriefPage(Base):
+    __tablename__ = "brief_pages"
+    __table_args__ = (UniqueConstraint("job_id", "page", name="uq_brief_pages_job_page"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    page: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    job: Mapped[Job] = relationship(back_populates="pages")
 
 
 class Citation(Base):

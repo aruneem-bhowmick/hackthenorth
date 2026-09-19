@@ -1,24 +1,30 @@
+import hashlib
+import hmac
 import json
+import secrets
 import uuid
 from pathlib import Path
 
 import sentry_sdk
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import Settings, get_settings
-from app.db import Citation, Finding, Job, JobMode, JobStatus, default_expiry, get_session
+from app.db import BriefPage, Citation, Finding, Job, JobMode, JobStatus, default_expiry, get_session
 from app.queue import get_arq_pool
 from app.schemas import (
     CitationResponse,
+    CitationSpanResponse,
     CitationsResponse,
     ClaimResponse,
     FindingResponse,
     JobCreateResponse,
     JobStatusResponse,
+    BriefPageResponse,
+    BriefPagesResponse,
 )
 from app.sse import subscribe_events
 
@@ -69,12 +75,14 @@ async def create_job(
                 )
             out.write(chunk)
 
+    review_token = secrets.token_urlsafe(32)
     job = Job(
         id=job_id,
         mode=mode,
         status=JobStatus.QUEUED.value,
         filename=file.filename or "upload.pdf",
         expires_at=default_expiry(),
+        review_token_hash=_token_hash(review_token),
     )
     session.add(job)
     await session.commit()
@@ -89,7 +97,7 @@ async def create_job(
         _job_id=str(job_id),
     )
 
-    return JobCreateResponse(job_id=job_id)
+    return JobCreateResponse(job_id=job_id, review_token=review_token)
 
 
 @router.get("/{job_id}", response_model=JobStatusResponse)
@@ -123,6 +131,34 @@ async def get_job_citations(
     return CitationsResponse(
         job_id=job_id,
         citations=[_to_citation_response(citation) for citation in citations],
+    )
+
+
+@router.get("/{job_id}/pages", response_model=BriefPagesResponse)
+async def get_job_pages(
+    job_id: uuid.UUID,
+    x_pincite_review_token: str | None = Header(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> BriefPagesResponse:
+    """Return extracted brief text and citation spans for its upload session."""
+    job = await session.get(Job, job_id)
+    if job is None:
+        raise HTTPException(404, detail={"error": {"code": "NOT_FOUND", "message": "job not found"}})
+    if not job.review_token_hash or not x_pincite_review_token or not hmac.compare_digest(
+        job.review_token_hash, _token_hash(x_pincite_review_token)
+    ):
+        raise HTTPException(403, detail={"error": {"code": "FORBIDDEN", "message": "review token required"}})
+    pages = list(await session.scalars(select(BriefPage).where(BriefPage.job_id == job_id).order_by(BriefPage.page)))
+    citations = list(await session.scalars(select(Citation).where(Citation.job_id == job_id)))
+    spans: dict[int, list[CitationSpanResponse]] = {}
+    for citation in citations:
+        if citation.page is not None and citation.start_offset is not None and citation.end_offset is not None:
+            spans.setdefault(citation.page, []).append(
+                CitationSpanResponse(id=citation.id, start=citation.start_offset, end=citation.end_offset)
+            )
+    return BriefPagesResponse(
+        job_id=job_id,
+        pages=[BriefPageResponse(page=item.page, text=item.text, citations=spans.get(item.page, [])) for item in pages],
     )
 
 
@@ -221,3 +257,7 @@ def _to_citation_response(citation: Citation) -> CitationResponse:
 
 def _sse_frame(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _token_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()

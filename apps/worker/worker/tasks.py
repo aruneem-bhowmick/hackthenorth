@@ -29,7 +29,7 @@ from verdicts import check_quote
 from worker.config import get_settings
 from worker.courtlistener import CourtListenerClient, CourtListenerUnavailable
 from worker.embeddings import EmbeddingUnavailable, cosine_scores
-from worker.db import Claim, Citation, Finding, Job, JobStatus, LookupCache, Source, SourceParagraph, get_sessionmaker
+from worker.db import BriefPage, Claim, Citation, Finding, Job, JobStatus, LookupCache, Source, SourceParagraph, get_sessionmaker
 from worker.rate_limit import CourtListenerRateLimiter
 from worker.sse import get_redis, publish_event
 
@@ -101,6 +101,7 @@ async def _ingest_and_enqueue(ctx: dict[str, Any], job_id: str) -> None:
                 raise IngestionError("UNSUPPORTED_FILE", "The uploaded PDF could not be found.")
             document = extract_pdf(pdf_path)
             job.page_count = document.page_count
+            await _persist_brief_pages(session, job.id, document)
             extracted = extract_citations(document)
             persisted = await _persist_citations(session, job.id, extracted)
             await session.commit()
@@ -188,6 +189,13 @@ async def _persist_citations(session: Any, job_id: uuid.UUID, extracted: Any) ->
                 )
             )
     return records
+
+
+async def _persist_brief_pages(session: Any, job_id: uuid.UUID, document: Any) -> None:
+    existing = await session.scalar(select(BriefPage.id).where(BriefPage.job_id == job_id).limit(1))
+    if existing is not None:
+        return
+    session.add_all(BriefPage(job_id=job_id, page=item.page, text=item.raw_text) for item in document.pages)
 
 
 async def process_citation(ctx: dict[str, Any], citation_id: str) -> None:

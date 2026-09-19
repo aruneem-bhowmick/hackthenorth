@@ -7,6 +7,24 @@ from pydantic import BaseModel, Field
 
 class JobCreateResponse(BaseModel):
     job_id: uuid.UUID
+    review_token: str
+
+
+class CitationSpanResponse(BaseModel):
+    id: uuid.UUID
+    start: int
+    end: int
+
+
+class BriefPageResponse(BaseModel):
+    page: int
+    text: str
+    citations: list[CitationSpanResponse] = Field(default_factory=list)
+
+
+class BriefPagesResponse(BaseModel):
+    job_id: uuid.UUID
+    pages: list[BriefPageResponse] = Field(default_factory=list)
 
 
 class JobStatusResponse(BaseModel):
