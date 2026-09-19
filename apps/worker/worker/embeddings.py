@@ -14,19 +14,29 @@ class EmbeddingUnavailable(RuntimeError):
     pass
 
 
-async def cosine_scores(api_key: str, query: str, candidates: Sequence[tuple[str, str]]) -> dict[str, float]:
+async def cosine_scores(
+    api_key: str,
+    query: str,
+    candidates: Sequence[tuple[str, str]],
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, float]:
     """Embed one quote and a bounded local set of candidate paragraphs."""
     if not candidates:
         return {}
+    owns_client = client is None
+    active_client = client or httpx.AsyncClient(timeout=httpx.Timeout(8.0))
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
-            response = await client.post(
-                "https://api.openai.com/v1/embeddings",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={"model": MODEL, "input": [query, *(text for _, text in candidates)]},
-            )
+        response = await active_client.post(
+            "https://api.openai.com/v1/embeddings",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"model": MODEL, "input": [query, *(text for _, text in candidates)]},
+        )
     except httpx.HTTPError as exc:
         raise EmbeddingUnavailable("OpenAI embeddings request failed") from exc
+    finally:
+        if owns_client:
+            await active_client.aclose()
     if response.status_code != 200:
         raise EmbeddingUnavailable(f"OpenAI embeddings returned HTTP {response.status_code}")
     payload = response.json()

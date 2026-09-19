@@ -7,14 +7,16 @@ otherwise independent citations (FR-SYS-002).
 
 from __future__ import annotations
 
-import json
+import asyncio
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
+import httpx
 import sentry_sdk
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -34,7 +36,19 @@ from worker.courtlistener import (
     CourtListenerUnavailable,
 )
 from worker.embeddings import EmbeddingUnavailable, cosine_scores
-from worker.db import BriefPage, Claim, Citation, Finding, Job, JobStatus, LookupCache, Source, SourceParagraph, get_sessionmaker
+from worker.db import (
+    BriefPage,
+    Claim,
+    Citation,
+    Finding,
+    Job,
+    JobStatus,
+    LookupCache,
+    Source,
+    SourceAcquisition,
+    SourceParagraph,
+    get_sessionmaker,
+)
 from worker.rate_limit import COURTLISTENER_VALID_CITATIONS_PER_MINUTE, CourtListenerRateLimiter
 from worker.sse import get_redis, publish_event
 
@@ -68,6 +82,39 @@ def _clean_opinion_text(opinion: dict[str, Any]) -> str:
 
 def _paragraph_texts(text: str) -> list[str]:
     return [part.strip() for part in re.split(r"\n\s*\n+", text) if part.strip()]
+
+
+@dataclass(frozen=True)
+class SourceMaterial:
+    """Network-fetched opinion text, kept outside a database transaction."""
+
+    cluster_id: str
+    case_name: str | None
+    court: str | None
+    paragraphs: list[tuple[str, str | None]]
+
+
+async def startup(ctx: dict[str, Any]) -> None:
+    """Reuse CourtListener connections and cap independent source downloads."""
+    ctx["courtlistener_http"] = httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=5.0, read=15.0, write=15.0, pool=5.0),
+        limits=httpx.Limits(max_connections=6, max_keepalive_connections=6),
+    )
+    ctx["source_fetch_semaphore"] = asyncio.Semaphore(4)
+    ctx["openai_http"] = httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=3.0, read=8.0, write=8.0, pool=3.0),
+        limits=httpx.Limits(max_connections=8, max_keepalive_connections=8),
+    )
+    ctx["embedding_semaphore"] = asyncio.Semaphore(8)
+
+
+async def shutdown(ctx: dict[str, Any]) -> None:
+    client = ctx.get("courtlistener_http")
+    if client is not None:
+        await client.aclose()
+    client = ctx.get("openai_http")
+    if client is not None:
+        await client.aclose()
 
 
 async def process_job(
@@ -342,9 +389,11 @@ async def _persist_brief_pages(session: Any, job_id: uuid.UUID, document: Any) -
 
 
 async def process_citation(ctx: dict[str, Any], citation_id: str) -> None:
-    """Resolve and quote-check one citation, then publish its completed findings."""
+    """Persist an existence result before any opinion download begins."""
 
     sessionmaker = get_sessionmaker()
+    source_cluster_id: str | None = None
+    quote_ready = False
     async with sessionmaker() as session:
         citation = await session.get(Citation, uuid.UUID(citation_id))
         if citation is None:
@@ -355,7 +404,7 @@ async def process_citation(ctx: dict[str, Any], citation_id: str) -> None:
             span.set_tag("job_id", str(citation.job_id))
             span.set_tag("citation_id", citation_id)
             try:
-                await _resolve_citation(session, citation)
+                source_cluster_id, quote_ready = await _resolve_citation(session, citation)
                 await session.commit()
             except Exception:  # keep one citation from blocking all others
                 await session.rollback()
@@ -377,14 +426,35 @@ async def process_citation(ctx: dict[str, Any], citation_id: str) -> None:
                 await session.commit()
             await _publish_citation_findings(session, citation)
             await _maybe_finish_job(session, job_pk)
+    # Queue after the short resolution transaction has committed.  A slow
+    # source can therefore never replace or delay an already-known authority.
+    if source_cluster_id:
+        await ctx["redis"].enqueue_job(
+            "process_source",
+            source_cluster_id,
+            # Database acquisition state is the durable cross-job dedupe key.
+            # ARQ's job key expires much later, so it must be per scheduling
+            # attempt rather than a permanent cluster-wide lock.
+            _job_id=f"source:{citation_id}",
+            _defer_by=-60,
+        )
+    elif quote_ready:
+        # A completed durable source needs no new acquisition task. Its quote
+        # task is independently idempotent and cannot block source fetching.
+        await ctx["redis"].enqueue_job("process_quote", citation_id, _job_id=f"quote:{citation_id}")
 
 
-async def _resolve_citation(session: Any, citation: Citation) -> None:
+async def _resolve_citation(session: Any, citation: Citation) -> tuple[str | None, bool]:
+    """Return source work to queue, or whether a local source can be checked."""
     if citation.resolution_state == AntecedentState.UNRESOLVED.value:
         await _write_finding(
             session, citation, "existence", "UNVERIFIABLE", None, ["UNRESOLVED_REFERENCE"], {}
         )
-        return
+        # A quote cannot be aligned without a resolved source.  It must still
+        # reach the approved terminal state so this one short-form reference
+        # cannot keep the entire brief in ``processing`` (NFR-REL-001).
+        await _write_quote_unavailable(session, citation)
+        return None, False
     target = citation
     if citation.antecedent_id:
         antecedent = await session.get(Citation, citation.antecedent_id)
@@ -392,7 +462,8 @@ async def _resolve_citation(session: Any, citation: Citation) -> None:
             await _write_finding(
                 session, citation, "existence", "UNVERIFIABLE", None, ["UNRESOLVED_REFERENCE"], {}
             )
-            return
+            await _write_quote_unavailable(session, citation)
+            return None, False
         target = antecedent
 
     cache = await session.scalar(select(LookupCache).where(LookupCache.normalized_citation == target.normalized))
@@ -413,7 +484,7 @@ async def _resolve_citation(session: Any, citation: Citation) -> None:
                 session, citation, "existence", "UNVERIFIABLE", None, ["UNRECOGNIZED_REFERENCE"], {}
             )
             await _write_quote_unavailable(session, citation)
-            return
+            return None, False
         lookup = lookups[0]
         lookup_payload = _lookup_payload(lookup)
         cache = LookupCache(normalized_citation=target.normalized, status=str(lookup.status), response=lookup_payload)
@@ -435,26 +506,51 @@ async def _resolve_citation(session: Any, citation: Citation) -> None:
         if citation.antecedent_id:
             citation.resolution_state = "resolved_via_antecedent"
         claims = list(await session.scalars(select(Claim).where(Claim.citation_id == citation.id)))
-        if not claims:
-            return
-        # The P1 demo's essential evidence is the source for an attached quote.
-        # Do not retrieve an entire opinion for citation-only occurrences: its
-        # lookup result already supports the existence finding. This is the
-        # scoped lazy-source exception approved for NFR-PERF-002.
-        if source is None and lookup_payload.get("clusters"):
-            settings = get_settings()
-            if settings.courtlistener_api_token:
-                client = CourtListenerClient(settings.courtlistener_api_token)
-                try:
-                    source = await _store_source(session, client, lookup_payload["clusters"][0])
-                except CourtListenerUnavailable:
-                    source = None
-                if source is not None:
-                    cache.source_id = source.id
-        if source is not None:
-            await _quote_check(session, citation, source, claims)
-        else:
+        if not any(claim.quote_text for claim in claims):
+            return None, False
+        # FR-RES-004 (P1 scope) only acquires a full opinion when a quote needs
+        # evidence.  Source acquisition is deduplicated by CourtListener
+        # cluster and happens in a separate durable task.
+        clusters = lookup_payload.get("clusters", [])
+        if not clusters or not isinstance(clusters[0], dict) or not clusters[0].get("id"):
             await _write_quote_unavailable(session, citation)
+            return None, False
+        cluster = clusters[0]
+        cluster_id = str(cluster["id"])
+        acquisition = await session.scalar(
+            select(SourceAcquisition).where(SourceAcquisition.cluster_id == cluster_id)
+        )
+        if acquisition is None:
+            acquisition = SourceAcquisition(
+                cluster_id=cluster_id,
+                state="queued",
+                source_url=f"https://www.courtlistener.com/api/rest/v4/clusters/{cluster_id}/",
+            )
+            # Same-opinion citations are deliberately independent stage-one
+            # tasks.  The unique cluster key arbitrates their race without
+            # turning the losing citation into an upstream failure.
+            try:
+                async with session.begin_nested():
+                    session.add(acquisition)
+                    await session.flush()
+            except IntegrityError:
+                acquisition = await session.scalar(
+                    select(SourceAcquisition).where(SourceAcquisition.cluster_id == cluster_id)
+                )
+                if acquisition is None:
+                    raise
+        citation.source_acquisition_id = acquisition.id
+        if source is not None:
+            acquisition.source_id = source.id
+            acquisition.state = "fetched"
+            acquisition.retrieved_at = acquisition.retrieved_at or datetime.now(timezone.utc)
+            return None, True
+        if acquisition.state == "fetched" and acquisition.source_id:
+            return None, True
+        if acquisition.state == "unavailable":
+            await _write_quote_unavailable(session, citation)
+            return None, False
+        return cluster_id, False
     elif status == 404:
         citation.resolution_state = "not_in_database"
         await _write_finding(session, citation, "existence", "NOT_IN_DATABASE", 1.0, [], {})
@@ -479,15 +575,12 @@ async def _resolve_citation(session: Any, citation: Citation) -> None:
         await _write_quote_unavailable(session, citation)
     else:
         raise CourtListenerUnavailable(f"unsupported lookup status {status}")
+    return None, False
 
 
-async def _store_source(session: Any, client: CourtListenerClient, cluster: dict[str, Any]) -> Source | None:
-    cluster_id = cluster.get("id")
-    external_id = f"courtlistener-cluster:{cluster_id}" if cluster_id else None
-    if external_id:
-        existing = await session.scalar(select(Source).where(Source.external_id == external_id))
-        if existing is not None:
-            return existing
+async def _fetch_source_material(client: CourtListenerClient, cluster_id: str) -> SourceMaterial | None:
+    """Fetch remote source data without retaining a database connection."""
+    cluster = {"id": int(cluster_id)}
     opinions = await client.fetch_cluster_opinions(cluster)
     paragraphs: list[tuple[str, str | None]] = []
     for opinion in opinions:
@@ -496,12 +589,26 @@ async def _store_source(session: Any, client: CourtListenerClient, cluster: dict
         paragraphs.extend((paragraph, part) for paragraph in _paragraph_texts(text))
     if not paragraphs:
         return None
+    return SourceMaterial(
+        cluster_id=cluster_id,
+        case_name=None,
+        court=None,
+        paragraphs=paragraphs,
+    )
+
+
+async def _persist_source_material(session: Any, material: SourceMaterial) -> Source:
+    external_id = f"courtlistener-cluster:{material.cluster_id}"
+    if external_id:
+        existing = await session.scalar(select(Source).where(Source.external_id == external_id))
+        if existing is not None:
+            return existing
     source = Source(
         kind="opinion",
-        case_name=str(cluster.get("case_name") or "") or None,
-        court=str(cluster.get("court") or "") or None,
+        case_name=material.case_name,
+        court=material.court,
         external_id=external_id,
-        text="\n\n".join(text for text, _ in paragraphs),
+        text="\n\n".join(text for text, _ in material.paragraphs),
     )
     try:
         # Multiple citations can resolve to the same cluster concurrently.
@@ -512,44 +619,225 @@ async def _store_source(session: Any, client: CourtListenerClient, cluster: dict
             session.add(source)
             await session.flush()
     except IntegrityError:
-        if not external_id:
-            raise
         existing = await session.scalar(select(Source).where(Source.external_id == external_id))
         if existing is None:
             raise
         return existing
-    for number, (text, opinion_part) in enumerate(paragraphs, start=1):
+    for number, (text, opinion_part) in enumerate(material.paragraphs, start=1):
         session.add(SourceParagraph(source_id=source.id, para_no=number, opinion_part=opinion_part, text=text))
     return source
 
 
+async def process_source(ctx: dict[str, Any], cluster_id: str) -> None:
+    """Acquire one CourtListener cluster once, with a bounded shared budget."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        acquisition = await session.scalar(
+            select(SourceAcquisition)
+            .where(SourceAcquisition.cluster_id == cluster_id)
+            .with_for_update()
+        )
+        if acquisition is None:
+            return
+        if acquisition.state in {"fetched", "unavailable"}:
+            citation_ids = list(
+                await session.scalars(select(Citation.id).where(Citation.source_acquisition_id == acquisition.id))
+            )
+            await session.commit()
+        else:
+            citation_ids = []
+            if acquisition.state == "fetching":
+                # Another independently queued citation already owns this
+                # cluster's bounded fetch; it will fan out quote tasks.
+                await session.commit()
+                return
+            acquisition.state = "fetching"
+            acquisition.attempt_count += 1
+            await session.commit()
+
+    if citation_ids:
+        for citation_id in citation_ids:
+            await ctx["redis"].enqueue_job("process_quote", str(citation_id), _job_id=f"quote:{citation_id}")
+        return
+
+    settings = get_settings()
+    material: SourceMaterial | None = None
+    failure_code: str | None = None
+    if not settings.courtlistener_api_token:
+        failure_code = "UPSTREAM_NOT_CONFIGURED"
+    else:
+        http_client = ctx.get("courtlistener_http")
+        owns_client = http_client is None
+        if http_client is None:
+            http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=5.0, read=15.0, write=15.0, pool=5.0),
+                limits=httpx.Limits(max_connections=6, max_keepalive_connections=6),
+            )
+        try:
+            semaphore = ctx.get("source_fetch_semaphore")
+            client = CourtListenerClient(
+                settings.courtlistener_api_token,
+                client=http_client,
+                max_retries=1,
+            )
+            if semaphore is None:
+                material = await _fetch_source_material(client, cluster_id)
+            else:
+                async with semaphore:
+                    material = await _fetch_source_material(client, cluster_id)
+            if material is None:
+                failure_code = "SOURCE_EMPTY"
+        except CourtListenerUnavailable:
+            failure_code = "UPSTREAM_UNAVAILABLE"
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A malformed or unexpectedly slow upstream response must not
+            # leave this acquisition permanently in ``fetching``.  Preserve a
+            # terminal, honest source state for the dependent quote claims.
+            sentry_sdk.capture_exception()
+            failure_code = "SOURCE_RETRIEVAL_FAILED"
+        finally:
+            if owns_client:
+                await http_client.aclose()
+
+    async with sessionmaker() as session:
+        acquisition = await session.scalar(
+            select(SourceAcquisition).where(SourceAcquisition.cluster_id == cluster_id)
+        )
+        if acquisition is None:
+            return
+        if material is not None:
+            source = await _persist_source_material(session, material)
+            acquisition.state = "fetched"
+            acquisition.source_id = source.id
+            acquisition.failure_code = None
+            acquisition.retrieved_at = datetime.now(timezone.utc)
+        else:
+            acquisition.state = "unavailable"
+            acquisition.failure_code = failure_code or "UPSTREAM_UNAVAILABLE"
+        citation_ids = list(
+            await session.scalars(select(Citation.id).where(Citation.source_acquisition_id == acquisition.id))
+        )
+        await session.commit()
+
+    for citation_id in citation_ids:
+        await ctx["redis"].enqueue_job("process_quote", str(citation_id), _job_id=f"quote:{citation_id}")
+
+
+async def process_quote(ctx: dict[str, Any], citation_id: str) -> None:
+    """Check a quote only after its durable source stage is terminal."""
+    sessionmaker = get_sessionmaker()
+    quote_results: list[tuple[str, float | None, list[str], dict[str, Any]]] = []
+    source_unavailable = False
+    quote_work: tuple[Citation, Source, list[Claim], list[SourceParagraph]] | None = None
+    async with sessionmaker() as session:
+        citation = await session.get(Citation, uuid.UUID(citation_id))
+        if citation is None or citation.source_acquisition_id is None:
+            return
+        job_id = citation.job_id
+        acquisition = await session.get(SourceAcquisition, citation.source_acquisition_id)
+        if acquisition is None or acquisition.state not in {"fetched", "unavailable"}:
+            return
+        if acquisition.state == "fetched" and acquisition.source_id:
+            source = await session.get(Source, acquisition.source_id)
+            claims = list(await session.scalars(select(Claim).where(Claim.citation_id == citation.id)))
+            if source is not None:
+                paragraphs = list(
+                    await session.scalars(
+                        select(SourceParagraph)
+                        .where(SourceParagraph.source_id == source.id)
+                        .order_by(SourceParagraph.para_no)
+                    )
+                )
+                # This reads all required evidence before releasing the
+                # connection.  Deterministic alignment and any optional
+                # embedding request below therefore never hold a DB session.
+                quote_work = (citation, source, claims, paragraphs)
+            else:
+                source_unavailable = True
+        else:
+            source_unavailable = True
+
+    if quote_work is not None:
+        try:
+            quote_results = await _quote_check(
+                *quote_work,
+                embedding_client=ctx.get("openai_http"),
+                embedding_semaphore=ctx.get("embedding_semaphore"),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A single malformed source paragraph or alignment edge case is
+            # not allowed to strand the complete review.  SOURCE_UNAVAILABLE
+            # is the approved neutral P1 quote state when no usable evidence
+            # can be produced (NFR-REL-001).
+            sentry_sdk.capture_exception()
+            source_unavailable = True
+
+    async with sessionmaker() as session:
+        citation = await session.get(Citation, uuid.UUID(citation_id))
+        if citation is None:
+            return
+        if source_unavailable:
+            await _write_quote_unavailable(session, citation)
+        for verdict, confidence, notes, evidence in quote_results:
+            await _write_finding(session, citation, "quote", verdict, confidence, notes, evidence)
+        await session.commit()
+        await _publish_citation_findings(session, citation)
+        await _maybe_finish_job(session, job_id)
+
+
 async def _quote_check(
-    session: Any, citation: Citation, source: Source, claims: list[Claim]
-) -> None:
-    paragraphs = list(
-        await session.scalars(select(SourceParagraph).where(SourceParagraph.source_id == source.id).order_by(SourceParagraph.para_no))
-    )
+    citation: Citation,
+    source: Source,
+    claims: list[Claim],
+    paragraphs: list[SourceParagraph],
+    *,
+    embedding_client: httpx.AsyncClient | None = None,
+    embedding_semaphore: asyncio.Semaphore | None = None,
+    semantic_check_enabled: bool = True,
+) -> list[tuple[str, float | None, list[str], dict[str, Any]]]:
+    findings: list[tuple[str, float | None, list[str], dict[str, Any]]] = []
     for claim in claims:
         if not claim.quote_text:
             continue
-        result = check_quote(
+        # CourtListener opinions can contain thousands of paragraphs.  A
+        # high-similarity alignment necessarily shares several quote terms;
+        # rank by that signal first, then run the exact deterministic checker
+        # on a bounded local window.  This is retrieval, not a verdict—the
+        # checker and its evidence remain entirely deterministic and local.
+        verification_paragraphs = _quote_verification_candidates(claim.quote_text, paragraphs)
+        verdict_paragraphs = [
+            VerdictParagraph(str(item.id), item.text, item.page, item.opinion_part)
+            for item in verification_paragraphs
+        ]
+        result = await asyncio.to_thread(
+            check_quote,
             claim.quote_text,
-            [
-                VerdictParagraph(str(item.id), item.text, item.page, item.opinion_part)
-                for item in paragraphs
-            ],
+            verdict_paragraphs,
             pinpoint_page=_pinpoint_page(citation.pinpoint),
         )
-        # ADR-002 permits embeddings (not an LLM judge) for the one semantic
-        # question left after deterministic alignment. Bound P1 consumption to
-        # 32 source paragraphs per quote.
-        if result.semantic_check_status.value == "NOT_CONFIGURED" and get_settings().openai_api_key:
-            candidates = _semantic_candidates(claim.quote_text, paragraphs)
+        # Embeddings are an optional refinement, never a P1 completion
+        # dependency. The terminal deterministic finding remains honest about
+        # a semantic question that has not yet been run.
+        if semantic_check_enabled and result.semantic_check_status.value == "NOT_CONFIGURED" and get_settings().openai_api_key:
+            candidates = _semantic_candidates(claim.quote_text, verification_paragraphs)
             try:
-                scores = await cosine_scores(get_settings().openai_api_key, claim.quote_text, candidates)
-                result = check_quote(
+                if embedding_semaphore is None:
+                    scores = await cosine_scores(
+                        get_settings().openai_api_key, claim.quote_text, candidates, client=embedding_client
+                    )
+                else:
+                    async with embedding_semaphore:
+                        scores = await cosine_scores(
+                            get_settings().openai_api_key, claim.quote_text, candidates, client=embedding_client
+                        )
+                result = await asyncio.to_thread(
+                    check_quote,
                     claim.quote_text,
-                    [VerdictParagraph(str(item.id), item.text, item.page, item.opinion_part) for item in paragraphs],
+                    verdict_paragraphs,
                     pinpoint_page=_pinpoint_page(citation.pinpoint),
                     semantic_scores=scores,
                 )
@@ -566,15 +854,36 @@ async def _quote_check(
                 "paragraph_id": result.closest_passage.paragraph_id,
                 "text": result.closest_passage.text,
             }
-        await _write_finding(
-            session,
-            citation,
-            "quote",
-            result.verdict.value,
-            result.confidence,
-            [*result.notes, f"SEMANTIC_CHECK_{result.semantic_check_status.value}"],
-            evidence,
+        findings.append(
+            (
+                result.verdict.value,
+                result.confidence,
+                [*result.notes, f"SEMANTIC_CHECK_{result.semantic_check_status.value}"],
+                evidence,
+            )
         )
+    return findings
+
+
+def _quote_verification_candidates(quote: str, paragraphs: list[SourceParagraph]) -> list[SourceParagraph]:
+    """Select plausible local passages before word-level alignment.
+
+    A 24-passage cap bounds worst-case work on long opinions.  Every retained
+    passage is still original persisted opinion text; the quote checker itself
+    remains the sole verdict authority.
+    """
+    if len(paragraphs) <= 24:
+        return paragraphs
+    terms = set(re.findall(r"[a-z0-9]+", quote.casefold()))
+    ranked = sorted(
+        enumerate(paragraphs),
+        key=lambda indexed: (
+            len(terms & set(re.findall(r"[a-z0-9]+", indexed[1].text.casefold()))),
+            -indexed[0],
+        ),
+        reverse=True,
+    )
+    return [paragraph for _, paragraph in ranked[:24]]
 
 
 def _semantic_candidates(quote: str, paragraphs: list[SourceParagraph]) -> list[tuple[str, str]]:
@@ -642,12 +951,22 @@ async def _publish_citation_findings(session: Any, citation: Citation) -> None:
 
 async def _maybe_finish_job(session: Any, job_id: uuid.UUID) -> None:
     total = await session.scalar(select(func.count(Citation.id)).where(Citation.job_id == job_id))
-    complete = await session.scalar(
+    existence_complete = await session.scalar(
         select(func.count(Finding.id))
         .join(Citation, Finding.citation_id == Citation.id)
         .where(Citation.job_id == job_id, Finding.check == "existence")
     )
-    if total and total == complete:
+    quote_required = await session.scalar(
+        select(func.count(func.distinct(Citation.id)))
+        .join(Claim, Claim.citation_id == Citation.id)
+        .where(Citation.job_id == job_id, Claim.quote_text.is_not(None))
+    )
+    quote_complete = await session.scalar(
+        select(func.count(func.distinct(Finding.citation_id)))
+        .join(Citation, Finding.citation_id == Citation.id)
+        .where(Citation.job_id == job_id, Finding.check == "quote")
+    )
+    if total and total == existence_complete and quote_required == quote_complete:
         job = await session.get(Job, job_id)
         if job and job.status != JobStatus.COMPLETED.value:
             await _complete_job(session, job)

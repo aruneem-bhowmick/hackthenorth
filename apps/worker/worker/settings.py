@@ -7,7 +7,7 @@ import sentry_sdk
 from arq.connections import RedisSettings
 
 from worker.config import get_settings
-from worker.tasks import process_citation, process_job
+from worker.tasks import process_citation, process_job, process_quote, process_source, shutdown, startup
 
 _settings = get_settings()
 
@@ -21,12 +21,12 @@ if _settings.sentry_dsn_worker:
 
 
 class WorkerSettings:
-    functions = [process_job, process_citation]
+    functions = [process_job, process_citation, process_source, process_quote]
     redis_settings = RedisSettings.from_dsn(_settings.redis_url)
-    # Citation tasks hold a database session while an upstream source is
-    # retrieved. Keep this at the database-safe concurrency verified by the
-    # deployment smoke test; more tasks become connection contention, not
-    # useful parallelism.
+    on_startup = startup
+    on_shutdown = shutdown
+    # Resolution is database-safe at this concurrency. Source downloads have
+    # their own four-request semaphore and never hold a session while waiting.
     max_jobs = 10
     # Keep the default five-minute per-citation timeout.  The P1 latency target
     # is monitored at the job level; turning it into a 90-second hard kill

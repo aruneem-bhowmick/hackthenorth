@@ -415,12 +415,64 @@ def _segment_candidates(segment: list[_PatternToken], source: list[_Token]) -> l
     length = len(segment)
     slack = max(2, round(length * 0.30))
     candidates: list[_Candidate] = []
-    for start in range(len(source)):
-        for window_length in range(max(1, length - slack), min(len(source) - start, length + slack) + 1):
+    # Do not exhaustively pair every source offset with every permitted window
+    # length.  On a long opinion and a long quotation that becomes quadratic
+    # enough to starve the review queue. Four-token anchors are deterministic
+    # local retrieval: a high-similarity alignment must contain one unless it
+    # is already an extremely weak candidate. The bounded fallback below still
+    # produces an honest NOT_FOUND_IN_SOURCE/semantic-pending result.
+    starts = _anchored_starts(segment, source)
+    window_lengths = sorted(range(max(1, length - slack), length + slack + 1), key=lambda value: abs(value - length))
+    checks = 0
+    for start in starts:
+        if start < 0 or start >= len(source):
+            continue
+        added = False
+        for window_length in window_lengths:
+            if start + window_length > len(source):
+                continue
             end = start + window_length
             candidates.append(_Candidate(start, end, _token_similarity(segment, source[start:end])))
+            added = True
+            checks += 1
+            if checks >= 64:
+                break
+        if not added:
+            # Preserve a closest local passage even when an anchor lies near
+            # the end of the paragraph (for example an out-of-order ellipsis).
+            candidates.append(_Candidate(start, len(source), _token_similarity(segment, source[start:])))
+            checks += 1
+        if checks >= 64:
+            break
     candidates.sort(key=lambda candidate: (candidate.similarity, -(candidate.end - candidate.start), -candidate.start), reverse=True)
     return candidates[:32]
+
+
+def _anchored_starts(segment: list[_PatternToken], source: list[_Token]) -> list[int]:
+    if not source:
+        return []
+    width = min(4, len(segment))
+    starts: list[int] = []
+    seen: set[int] = set()
+    # Use several quote positions so a common opening ("the court") does not
+    # crowd out a later, more discriminating phrase.
+    offsets = sorted({0, max(0, (len(segment) - width) // 2), max(0, len(segment) - width)})
+    for offset in offsets:
+        anchor = segment[offset:offset + width]
+        for position in range(0, len(source) - width + 1):
+            if all(pattern.matcher.fullmatch(source[position + index].value) for index, pattern in enumerate(anchor)):
+                start = position - offset
+                if start not in seen:
+                    starts.append(start)
+                    seen.add(start)
+                    if len(starts) >= 24:
+                        return starts
+    if starts:
+        return starts
+    # A bounded spread across the opinion preserves a deterministic closest
+    # passage when no exact anchor exists, without unbounded CPU work.
+    step = max(1, len(source) // 24)
+    return list(range(0, len(source), step))[:24]
 
 
 def _best_local_candidate(pattern: list[_PatternToken], source: list[_Token]) -> _Candidate | None:
