@@ -23,7 +23,11 @@ if _settings.sentry_dsn_worker:
 class WorkerSettings:
     functions = [process_job, process_citation]
     redis_settings = RedisSettings.from_dsn(_settings.redis_url)
-    max_jobs = 30
+    # Citation tasks hold a database session while an upstream source is
+    # retrieved. Keep this at the database-safe concurrency verified by the
+    # deployment smoke test; more tasks become connection contention, not
+    # useful parallelism.
+    max_jobs = 10
     # Keep the default five-minute per-citation timeout.  The P1 latency target
     # is monitored at the job level; turning it into a 90-second hard kill
     # causes slow upstream lookups to retry and congest the queue.

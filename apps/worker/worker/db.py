@@ -184,13 +184,13 @@ _sessionmaker: async_sessionmaker[AsyncSession] | None = None
 def get_engine():
     global _engine
     if _engine is None:
-        # Each citation task owns a short-lived session.  Match the pool to
-        # WorkerSettings.max_jobs so a P1 burst does not exhaust SQLAlchemy's
-        # default 5 + 10 connection pool and turn into queued retries.
+        # Each citation task owns a session while it resolves a source. Match
+        # the pool to WorkerSettings.max_jobs so a burst cannot exhaust the
+        # database connection budget and become queued retries.
         _engine = create_async_engine(
             get_settings().database_url,
             pool_pre_ping=True,
-            pool_size=30,
+            pool_size=10,
             max_overflow=0,
         )
     return _engine
