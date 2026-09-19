@@ -452,13 +452,28 @@ async def _prime_proposition_extraction(
         propositions = await extract_propositions(
             settings.openai_api_key, excerpts, client, on_usage=capture_usage
         )
+    # P2 persists exactly one claim per citation.  Load all claims for the
+    # extraction batch before updating them so a citation-dense brief does not
+    # issue one claims SELECT per citation (NFR-OBS-001).
+    proposition_citation_ids = [
+        record.id
+        for record in persisted
+        if propositions.get(str(record.id)) is not None
+    ]
+    claims_by_citation: dict[uuid.UUID, Claim] = {}
+    if proposition_citation_ids:
+        claims = await session.scalars(
+            select(Claim).where(Claim.citation_id.in_(proposition_citation_ids))
+        )
+        for claim in claims:
+            # Keep the same first-row behavior as ``session.scalar`` if a
+            # legacy database contains an unexpected duplicate claim.
+            claims_by_citation.setdefault(claim.citation_id, claim)
     for record, item in zip(persisted, extracted, strict=True):
         proposition = propositions.get(str(record.id))
         if proposition is None:
             continue
-        claim = await session.scalar(
-            select(Claim).where(Claim.citation_id == record.id)
-        )
+        claim = claims_by_citation.get(record.id)
         if claim is None:
             continue
         context = pages[item.context_span.page][
