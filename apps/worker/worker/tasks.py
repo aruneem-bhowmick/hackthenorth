@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import re
-import re
 import uuid
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -27,10 +26,16 @@ from verdicts import SourceParagraph as VerdictParagraph
 from verdicts import check_quote
 
 from worker.config import get_settings
-from worker.courtlistener import CourtListenerClient, CourtListenerUnavailable
+from worker.courtlistener import (
+    MAX_CITATIONS_PER_REQUEST,
+    MAX_TEXT_CHARS_PER_REQUEST,
+    CitationLookup,
+    CourtListenerClient,
+    CourtListenerUnavailable,
+)
 from worker.embeddings import EmbeddingUnavailable, cosine_scores
 from worker.db import BriefPage, Claim, Citation, Finding, Job, JobStatus, LookupCache, Source, SourceParagraph, get_sessionmaker
-from worker.rate_limit import CourtListenerRateLimiter
+from worker.rate_limit import COURTLISTENER_VALID_CITATIONS_PER_MINUTE, CourtListenerRateLimiter
 from worker.sse import get_redis, publish_event
 
 
@@ -104,6 +109,16 @@ async def _ingest_and_enqueue(ctx: dict[str, Any], job_id: str) -> None:
             await _persist_brief_pages(session, job.id, document)
             extracted = extract_citations(document)
             persisted = await _persist_citations(session, job.id, extracted)
+            # FR-RES-001: resolve distinct full citations in bounded CourtListener
+            # batches before citation fan-out.  Short forms reuse their
+            # antecedent's cache entry in their independent task.
+            try:
+                await _prime_lookup_cache(session, persisted)
+            except CourtListenerUnavailable:
+                # The independent tasks retain their per-citation failure
+                # isolation and will record neutral unavailable findings.
+                # A transient batch failure must not fail the whole brief.
+                pass
             await session.commit()
             await publish_event(
                 job_id,
@@ -191,6 +206,132 @@ async def _persist_citations(session: Any, job_id: uuid.UUID, extracted: Any) ->
     return records
 
 
+async def _prime_lookup_cache(session: Any, citations: list[Citation]) -> None:
+    """Resolve each uncached full citation in CourtListener-sized batches.
+
+    This is deliberately pre-fan-out: it fulfills FR-RES-001 while retaining
+    FR-SYS-002's independent source/quote task for every citation occurrence.
+    A brief can contain many repeat or short citations, but it should make at
+    most one lookup request for each distinct full normalized citation.
+    """
+
+    settings = get_settings()
+    if not settings.courtlistener_api_token:
+        return
+    unique_targets = {
+        citation.normalized: citation
+        for citation in citations
+        if citation.kind == "full" and citation.resolution_state != AntecedentState.UNRESOLVED.value
+    }
+    if not unique_targets:
+        return
+    cached = set(
+        await session.scalars(
+            select(LookupCache.normalized_citation).where(
+                LookupCache.normalized_citation.in_(tuple(unique_targets))
+            )
+        )
+    )
+    pending = [citation for normalized, citation in unique_targets.items() if normalized not in cached]
+    if not pending:
+        return
+
+    limiter = CourtListenerRateLimiter(get_redis())
+    client = CourtListenerClient(settings.courtlistener_api_token, acquire_rate_limit=limiter.acquire)
+    for batch in _citation_batches(pending):
+        text, spans = _batch_text(batch)
+        lookups = await client.lookup_text(text, expected_citations=len(batch))
+        payloads = _lookup_payloads_for_batch(batch, spans, lookups)
+        for citation in batch:
+            payload = payloads[citation.id]
+            session.add(
+                LookupCache(
+                    normalized_citation=citation.normalized,
+                    status=str(payload["status"]),
+                    response=payload,
+                )
+            )
+    await session.flush()
+
+
+def _citation_batches(citations: list[Citation]) -> list[list[Citation]]:
+    """Partition citations without exceeding CourtListener's published caps."""
+
+    batches: list[list[Citation]] = []
+    current: list[Citation] = []
+    chars = 0
+    for citation in citations:
+        text = citation.raw_text.strip() or citation.normalized
+        size = len(text) + (1 if current else 0)
+        if len(text) > MAX_TEXT_CHARS_PER_REQUEST:
+            raise ValueError("a normalized citation exceeds CourtListener's text limit")
+        if current and (
+            len(current) == min(MAX_CITATIONS_PER_REQUEST, COURTLISTENER_VALID_CITATIONS_PER_MINUTE)
+            or chars + size > MAX_TEXT_CHARS_PER_REQUEST
+        ):
+            batches.append(current)
+            current, chars = [], 0
+            size = len(text)
+        current.append(citation)
+        chars += size
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _batch_text(citations: list[Citation]) -> tuple[str, dict[uuid.UUID, tuple[int, int]]]:
+    parts: list[str] = []
+    spans: dict[uuid.UUID, tuple[int, int]] = {}
+    offset = 0
+    for citation in citations:
+        text = citation.raw_text.strip() or citation.normalized
+        if parts:
+            offset += 1  # newline separator
+        start = offset
+        offset += len(text)
+        spans[citation.id] = (start, offset)
+        parts.append(text)
+    return "\n".join(parts), spans
+
+
+def _lookup_payload(lookup: CitationLookup) -> dict[str, Any]:
+    return {
+        "citation": lookup.citation,
+        "normalized_citations": list(lookup.normalized_citations),
+        "status": lookup.status,
+        "error_message": lookup.error_message,
+        "clusters": list(lookup.clusters),
+    }
+
+
+def _lookup_payloads_for_batch(
+    citations: list[Citation], spans: dict[uuid.UUID, tuple[int, int]], lookups: list[CitationLookup]
+) -> dict[uuid.UUID, dict[str, Any]]:
+    """Associate CourtListener offset results with their input citations."""
+
+    payloads: dict[uuid.UUID, dict[str, Any]] = {}
+    for lookup in lookups:
+        for citation in citations:
+            start, end = spans[citation.id]
+            if start <= lookup.start_index < end:
+                payloads.setdefault(citation.id, _lookup_payload(lookup))
+                break
+    # CourtListener can omit text that its parser cannot recognize. Preserve a
+    # neutral P1 outcome for that individual cite instead of dropping it.
+    for citation in citations:
+        payloads.setdefault(
+            citation.id,
+            {
+                "citation": citation.raw_text,
+                "normalized_citations": [],
+                "status": 400,
+                "error_message": "CourtListener did not recognize this citation in the request batch.",
+                "clusters": [],
+            },
+        )
+    return payloads
+
+
 async def _persist_brief_pages(session: Any, job_id: uuid.UUID, document: Any) -> None:
     existing = await session.scalar(select(BriefPage.id).where(BriefPage.job_id == job_id).limit(1))
     if existing is not None:
@@ -256,10 +397,9 @@ async def _resolve_citation(session: Any, citation: Citation) -> None:
 
     cache = await session.scalar(select(LookupCache).where(LookupCache.normalized_citation == target.normalized))
     lookup_payload: dict[str, Any]
-    source: Source | None = None
+    source: Source | None = await session.get(Source, cache.source_id) if cache and cache.source_id else None
     if cache is not None:
         lookup_payload = cache.response
-        source = await session.get(Source, cache.source_id) if cache.source_id else None
     else:
         settings = get_settings()
         if not settings.courtlistener_api_token:
@@ -275,19 +415,10 @@ async def _resolve_citation(session: Any, citation: Citation) -> None:
             await _write_quote_unavailable(session, citation)
             return
         lookup = lookups[0]
-        lookup_payload = {
-            "citation": lookup.citation,
-            "normalized_citations": list(lookup.normalized_citations),
-            "status": lookup.status,
-            "error_message": lookup.error_message,
-            "clusters": list(lookup.clusters),
-        }
+        lookup_payload = _lookup_payload(lookup)
         cache = LookupCache(normalized_citation=target.normalized, status=str(lookup.status), response=lookup_payload)
         session.add(cache)
         await session.flush()
-        if lookup.status == 200 and lookup.clusters:
-            source = await _store_source(session, client, lookup.clusters[0])
-            cache.source_id = source.id if source else None
 
     status = int(lookup_payload["status"])
     if status == 200:
@@ -304,9 +435,25 @@ async def _resolve_citation(session: Any, citation: Citation) -> None:
         if citation.antecedent_id:
             citation.resolution_state = "resolved_via_antecedent"
         claims = list(await session.scalars(select(Claim).where(Claim.citation_id == citation.id)))
-        if source and claims:
+        if not claims:
+            return
+        # The P1 demo's essential evidence is the source for an attached quote.
+        # Do not retrieve an entire opinion for citation-only occurrences: its
+        # lookup result already supports the existence finding. This is the
+        # scoped lazy-source exception approved for NFR-PERF-002.
+        if source is None and lookup_payload.get("clusters"):
+            settings = get_settings()
+            if settings.courtlistener_api_token:
+                client = CourtListenerClient(settings.courtlistener_api_token)
+                try:
+                    source = await _store_source(session, client, lookup_payload["clusters"][0])
+                except CourtListenerUnavailable:
+                    source = None
+                if source is not None:
+                    cache.source_id = source.id
+        if source is not None:
             await _quote_check(session, citation, source, claims)
-        elif claims:
+        else:
             await _write_quote_unavailable(session, citation)
     elif status == 404:
         citation.resolution_state = "not_in_database"

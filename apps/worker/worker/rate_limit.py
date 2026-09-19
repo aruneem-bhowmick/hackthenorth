@@ -12,6 +12,9 @@ from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 
+COURTLISTENER_VALID_CITATIONS_PER_MINUTE = 60
+
+
 class RedisScriptClient(Protocol):
     async def eval(self, script: str, numkeys: int, *keys_and_args: object) -> object: ...
 
@@ -42,7 +45,7 @@ class CourtListenerRateLimiter:
         self,
         redis: RedisScriptClient,
         *,
-        capacity: int = 60,
+        capacity: int = COURTLISTENER_VALID_CITATIONS_PER_MINUTE,
         window_seconds: float = 60.0,
         now_ms: Callable[[], int] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
