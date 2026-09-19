@@ -195,7 +195,9 @@ async def _persist_brief_pages(session: Any, job_id: uuid.UUID, document: Any) -
     existing = await session.scalar(select(BriefPage.id).where(BriefPage.job_id == job_id).limit(1))
     if existing is not None:
         return
-    session.add_all(BriefPage(job_id=job_id, page=item.page, text=item.raw_text) for item in document.pages)
+    session.add_all([BriefPage(job_id=job_id, page=item.page, text=item.raw_text) for item in document.pages])
+    # Persist extracted brief text before citation fan-out makes it reviewable.
+    await session.flush()
 
 
 async def process_citation(ctx: dict[str, Any], citation_id: str) -> None:
@@ -349,8 +351,21 @@ async def _store_source(session: Any, client: CourtListenerClient, cluster: dict
         external_id=external_id,
         text="\n\n".join(text for text, _ in paragraphs),
     )
-    session.add(source)
-    await session.flush()
+    try:
+        # Multiple citations can resolve to the same cluster concurrently.
+        # The unique external ID is the cross-worker lock; use a savepoint so
+        # the loser can reuse the committed source instead of failing its
+        # otherwise independent citation task.
+        async with session.begin_nested():
+            session.add(source)
+            await session.flush()
+    except IntegrityError:
+        if not external_id:
+            raise
+        existing = await session.scalar(select(Source).where(Source.external_id == external_id))
+        if existing is None:
+            raise
+        return existing
     for number, (text, opinion_part) in enumerate(paragraphs, start=1):
         session.add(SourceParagraph(source_id=source.id, para_no=number, opinion_part=opinion_part, text=text))
     return source
@@ -419,6 +434,14 @@ def _semantic_candidates(quote: str, paragraphs: list[SourceParagraph]) -> list[
         reverse=True,
     )
     return [(str(item.id), item.text) for item in ranked[:32]]
+
+
+def _pinpoint_page(pinpoint: str | None) -> int | None:
+    """Use the first numeric pinpoint for P1's informational page note."""
+    if not pinpoint:
+        return None
+    match = re.search(r"\d+", pinpoint)
+    return int(match.group()) if match else None
 
 
 async def _write_quote_unavailable(session: Any, citation: Citation) -> None:

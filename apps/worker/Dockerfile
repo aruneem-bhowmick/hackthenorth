@@ -21,6 +21,7 @@ COPY pyproject.toml uv.lock ./
 COPY apps/worker ./apps/worker
 COPY packages/pipeline ./packages/pipeline
 COPY packages/verdicts ./packages/verdicts
+COPY config ./config
 WORKDIR /app/apps/worker
 RUN uv sync --no-dev
 
