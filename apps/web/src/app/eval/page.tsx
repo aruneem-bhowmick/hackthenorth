@@ -50,7 +50,11 @@ export default async function EvaluationPage() {
   return <main className={styles.page}>
     <header className={styles.header}>
       <div>
-        <p className={styles.eyebrow}>PinCite · Evaluation</p>
+        <div className={styles.brandRow}>
+          {/* eslint-disable-next-line @next/next/no-img-element -- static mark, server component avoids client-only icon hook */}
+          <img src="/pushpin.svg" alt="" width={18} height={18} className={styles.brandMark} />
+          <p className={styles.eyebrow}>PinCite · Evaluation</p>
+        </div>
         <h1>Measure the review system against labelled examples.</h1>
       </div>
       <Link href="/">Return to review</Link>

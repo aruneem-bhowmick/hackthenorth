@@ -3,6 +3,7 @@
 import { ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { ExportButtons } from "../components/export-buttons";
+import { PinIcon } from "../components/pin-icon";
 import { CitationSignals, Signal, SignalHeatStrip } from "../components/signal-display";
 import { CheckFilter, citationMatchesFilters, SummaryPanel, ToneFilter } from "../components/summary-panel";
 import styles from "./page.module.css";
@@ -471,7 +472,10 @@ export default function Home() {
     <main className={styles.page}>
       <header className={styles.header}>
         <div>
-          <p className={styles.eyebrow}>PinCite · Citation review</p>
+          <div className={styles.brandRow}>
+            <PinIcon size={18} className={styles.brandMark} />
+            <p className={styles.eyebrow}>PinCite · Citation review</p>
+          </div>
           <h1>Check cited authority against the source text.</h1>
         </div>
         <div className={styles.headerLinks}>
