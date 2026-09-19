@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.db import Source, get_session
-from app.schemas import SourceParagraphResponse, SourceResponse
+from app.schemas import ProvenanceResponse, SourceParagraphResponse, SourceResponse
 
 
 router = APIRouter(prefix="/api/sources", tags=["sources"])
@@ -18,16 +18,11 @@ router = APIRouter(prefix="/api/sources", tags=["sources"])
 async def get_source(
     source_id: uuid.UUID, session: AsyncSession = Depends(get_session)
 ) -> SourceResponse:
-    """Return the stored source text and deterministic paragraphs for P1 review.
-
-    P3 will augment this shape with a complete provenance record.  Until then
-    the ``provenance`` response field is explicitly null rather than a partial
-    record that could be mistaken for independently auditable evidence.
-    """
+    """Return stored source text, paragraphs, and auditable provenance."""
     result = await session.execute(
         select(Source)
         .where(Source.id == source_id)
-        .options(selectinload(Source.paragraphs))
+        .options(selectinload(Source.paragraphs), selectinload(Source.provenance))
     )
     source = result.scalar_one_or_none()
     if source is None:
@@ -54,4 +49,17 @@ async def get_source(
             )
             for paragraph in sorted(source.paragraphs, key=lambda item: item.para_no)
         ],
+        provenance=(
+            ProvenanceResponse(
+                id=source.provenance.id,
+                url=source.provenance.url,
+                retrieved_at=source.provenance.retrieved_at,
+                method=source.provenance.method,
+                sha256=source.provenance.sha256,
+                snapshot_ref=source.provenance.snapshot_ref,
+                session_ref=source.provenance.session_ref,
+            )
+            if source.provenance is not None
+            else None
+        ),
     )

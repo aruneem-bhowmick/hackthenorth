@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Pincite | Citation review",
+  title: "PinCite | Citation review",
   description: "Evidence-first citation and quote review for federal briefs.",
 };
 

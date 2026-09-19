@@ -1,4 +1,4 @@
-# Railway production image for the Pincite review UI.  NEXT_PUBLIC values are
+# Railway production image for the PinCite review UI.  NEXT_PUBLIC values are
 # declared as build arguments so Next.js embeds the deployed API origin in the
 # browser bundle rather than falling back to localhost.
 FROM node:22-alpine

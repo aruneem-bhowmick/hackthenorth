@@ -1,4 +1,4 @@
-"""Deterministic PDF ingestion and legal-citation extraction for Pincite.
+"""Deterministic PDF ingestion and legal-citation extraction for PinCite.
 
 The package intentionally does not make network or model calls.  It provides the
 page/span-safe hand-off to the worker's resolution tasks required by P1.

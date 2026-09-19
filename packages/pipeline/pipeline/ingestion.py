@@ -149,7 +149,7 @@ def extract_pdf(pdf: bytes | bytearray | memoryview | Path | str) -> IngestedDoc
     if not any(text.strip() for text in raw_pages):
         raise IngestionError(
             "NO_TEXT_LAYER",
-            "This PDF has no extractable text layer. OCR is not available in Pincite.",
+            "This PDF has no extractable text layer. OCR is not available in PinCite.",
         )
 
     removed_by_page = _strip_repeated_running_lines(raw_pages)

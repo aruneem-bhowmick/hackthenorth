@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # yet been provisioned (or is temporarily unavailable).
     elastic_cloud_id: str | None = None
     elastic_api_key: str | None = None
+    # The investigator runs in the worker process. Credentials stay here and
+    # are passed explicitly to the package boundary, never to the browser.
+    browserbase_api_key: str | None = None
+    browserbase_project_id: str | None = None
 
     @field_validator("database_url", mode="before")
     @classmethod

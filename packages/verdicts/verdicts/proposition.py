@@ -2,7 +2,7 @@
 
 The OpenAI call and retrieval happen in the worker.  This module deliberately
 does neither: it accepts only the already-returned judge payload and the exact
-paragraphs supplied to that judge, then enforces Pincite's evidence and
+paragraphs supplied to that judge, then enforces PinCite's evidence and
 confidence rules deterministically.
 """
 

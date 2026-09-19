@@ -46,6 +46,14 @@ type SourceParagraph = {
   page: number | null;
   text: string;
 };
+type Provenance = {
+  url: string | null;
+  retrieved_at: string;
+  method: string;
+  sha256: string;
+  snapshot_ref: string | null;
+  session_ref: string | null;
+};
 type Source = {
   id: string;
   case_name: string | null;
@@ -53,6 +61,7 @@ type Source = {
   decision_date: string | null;
   text: string | null;
   paragraphs: SourceParagraph[];
+  provenance: Provenance | null;
 };
 type DiffItem = {
   operation: "equal" | "insert" | "delete" | "replace";
@@ -69,27 +78,30 @@ type VerdictDetails = {
 
 function verdictDetails(verdict?: string): VerdictDetails {
   const details: Record<string, VerdictDetails> = {
-    VERIFIED: { label: "Case located", tone: "green", tooltip: "Pincite found a matching record for this citation in CourtListener." },
-    AMBIGUOUS: { label: "More than one possible case", tone: "yellow", tooltip: "Pincite found more than one possible source and could not choose one reliably." },
-    NOT_IN_DATABASE: { label: "Not located in CourtListener", tone: "grey", tooltip: "Pincite did not find a matching record in CourtListener." },
-    UNRECOGNIZED: { label: "Citation could not be recognised", tone: "grey", tooltip: "Pincite could not read this citation well enough to check it." },
-    PENDING: { label: "Checking source", tone: "grey", tooltip: "Pincite is still checking the source material for this citation." },
-    VERBATIM: { label: "Quote matches source", tone: "green", tooltip: "The quoted words match the source passage Pincite checked." },
+    VERIFIED: { label: "Case located", tone: "green", tooltip: "PinCite found a matching record for this citation in CourtListener." },
+    VERIFIED_OFFICIAL: { label: "Verified · official source", tone: "green", tooltip: "PinCite found this case on an official court or government source after checking beyond CourtListener." },
+    WEAKLY_CORROBORATED: { label: "Mention found; source not verified", tone: "yellow", tooltip: "PinCite found a matching mention but could not verify the opinion from an official source." },
+    NOT_FOUND_ANYWHERE: { label: "Could not be located anywhere", tone: "red", tooltip: "PinCite checked CourtListener and completed a bounded search for an official source without locating this citation." },
+    AMBIGUOUS: { label: "More than one possible case", tone: "yellow", tooltip: "PinCite found more than one possible source and could not choose one reliably." },
+    NOT_IN_DATABASE: { label: "Not located in CourtListener", tone: "grey", tooltip: "PinCite did not find a matching record in CourtListener." },
+    UNRECOGNIZED: { label: "Citation could not be recognised", tone: "grey", tooltip: "PinCite could not read this citation well enough to check it." },
+    PENDING: { label: "Searching the web", tone: "grey", tooltip: "PinCite is searching for an official source before reaching an existence result." },
+    VERBATIM: { label: "Quote matches source", tone: "green", tooltip: "The quoted words match the source passage PinCite checked." },
     VERBATIM_WITH_PERMITTED_ALTERATIONS: { label: "Quote matches; legal alteration used", tone: "green", tooltip: "The quote matches the source, including a standard bracket or ellipsis alteration." },
     ALTERED: { label: "Quote differs from source", tone: "yellow", tooltip: "Some quoted wording differs from the source passage. Review the linked source text." },
     PARAPHRASE_IN_QUOTES: { label: "Quoted text appears paraphrased", tone: "yellow", tooltip: "The quoted wording appears similar to, but does not match, source language." },
-    NOT_FOUND_IN_SOURCE: { label: "No matching language found", tone: "red", tooltip: "Pincite did not find the quoted language in the source material it checked." },
-    SOURCE_UNAVAILABLE: { label: "Source unavailable", tone: "grey", tooltip: "Pincite could not obtain source text for this comparison." },
-    SUPPORTS: { label: "Source supports this point", tone: "green", tooltip: "The cited source passages directly support the point Pincite checked." },
+    NOT_FOUND_IN_SOURCE: { label: "No matching language found", tone: "red", tooltip: "PinCite did not find the quoted language in the source material it checked." },
+    SOURCE_UNAVAILABLE: { label: "Source unavailable", tone: "grey", tooltip: "PinCite could not obtain source text for this comparison." },
+    SUPPORTS: { label: "Source supports this point", tone: "green", tooltip: "The cited source passages directly support the point PinCite checked." },
     PARTIAL: { label: "Source partly supports this point", tone: "yellow", tooltip: "The source passages address only part of the point, or come from a non-majority opinion." },
-    CONTRADICTS: { label: "Source points the other way", tone: "red", tooltip: "The cited source passages point in a different direction from the point Pincite checked." },
-    NOT_ADDRESSED: { label: "Source does not address this point", tone: "yellow", tooltip: "The retrieved source passages do not discuss the point Pincite checked." },
-    UNVERIFIABLE: { label: "Support could not be verified", tone: "grey", tooltip: "Pincite could not validate this result from the available source evidence." },
+    CONTRADICTS: { label: "Source points the other way", tone: "red", tooltip: "The cited source passages point in a different direction from the point PinCite checked." },
+    NOT_ADDRESSED: { label: "Source does not address this point", tone: "yellow", tooltip: "The retrieved source passages do not discuss the point PinCite checked." },
+    UNVERIFIABLE: { label: "Support could not be verified", tone: "grey", tooltip: "PinCite could not validate this result from the available source evidence." },
   };
   return details[verdict ?? ""] ?? {
     label: verdict?.replaceAll("_", " ") || "Awaiting check",
     tone: "grey",
-    tooltip: "Pincite does not yet have a plain-language explanation for this result.",
+    tooltip: "PinCite does not yet have a plain-language explanation for this result.",
   };
 }
 
@@ -236,6 +248,7 @@ export default function Home() {
   const [briefPages, setBriefPages] = useState<BriefPage[]>([]);
   const [selectedCitationId, setSelectedCitationId] = useState<string | null>(null);
   const [source, setSource] = useState<Source | null>(null);
+  const [activeInvestigations, setActiveInvestigations] = useState<Record<string, string | null>>({});
   const [activeParagraphIds, setActiveParagraphIds] = useState<Set<string>>(() => new Set());
   const [sourceStatus, setSourceStatus] = useState("Select a citation to inspect its source.");
   const [error, setError] = useState<string | null>(null);
@@ -337,6 +350,25 @@ export default function Home() {
       setJobStatus("A citation result just arrived.");
       void refreshCitations(activeJobId).catch((refreshError: unknown) => setError(String(refreshError)));
     });
+    stream.addEventListener("investigator.started", (event) => {
+      const data = JSON.parse((event as MessageEvent<string>).data) as { citation_id?: string; live_view_url?: string | null };
+      if (!data.citation_id) return;
+      setActiveInvestigations((current) => ({ ...current, [data.citation_id!]: data.live_view_url ?? null }));
+      setJobStatus("Searching the web for an official source…");
+      void refreshCitations(activeJobId).catch((refreshError: unknown) => setError(String(refreshError)));
+    });
+    stream.addEventListener("investigator.completed", (event) => {
+      const data = JSON.parse((event as MessageEvent<string>).data) as { citation_id?: string };
+      if (data.citation_id) {
+        setActiveInvestigations((current) => {
+          const next = { ...current };
+          delete next[data.citation_id!];
+          return next;
+        });
+      }
+      setJobStatus("Web source check completed.");
+      void refreshCitations(activeJobId).catch((refreshError: unknown) => setError(String(refreshError)));
+    });
     for (const terminalEvent of ["job.completed", "job.failed"]) {
       stream.addEventListener(terminalEvent, () => {
         setJobStatus(terminalEvent === "job.completed" ? "Review complete" : "Review ended with an issue");
@@ -365,6 +397,7 @@ export default function Home() {
     setBriefPages([]);
     setSelectedCitationId(null);
     setSource(null);
+    setActiveInvestigations({});
     setActiveParagraphIds(new Set());
     setSourceStatus("Citations will appear here as they are extracted.");
     setJobStatus("Uploading brief…");
@@ -392,16 +425,16 @@ export default function Home() {
     <main className={styles.page}>
       <header className={styles.header}>
         <div>
-          <p className={styles.eyebrow}>Pincite · Citation review</p>
+          <p className={styles.eyebrow}>PinCite · Citation review</p>
           <h1>Check cited authority against the source text.</h1>
         </div>
-        <p className={styles.disclaimer}>Pincite reports differences between a document and the sources it cites. It is not legal advice and does not assess anyone&apos;s intent. Always review the linked source text yourself.</p>
+        <p className={styles.disclaimer}>PinCite reports differences between a document and the sources it cites. It is not legal advice and does not assess anyone&apos;s intent. Always review the linked source text yourself.</p>
       </header>
 
       <section className={styles.uploadCard} aria-labelledby="upload-heading">
         <div>
           <h2 id="upload-heading">Start a brief review</h2>
-          <p>Upload a federal brief. Pincite will identify citations and show the source material it checked.</p>
+          <p>Upload a federal brief. PinCite will identify citations and show the source material it checked.</p>
         </div>
         <form className={styles.form} onSubmit={handleSubmit}>
           <fieldset className={styles.modeChoices}>
@@ -495,6 +528,17 @@ export default function Home() {
                 {selectedCitation.claims[0]?.quote_text && <p><strong>Quoted in brief:</strong> “{selectedCitation.claims[0].quote_text}”</p>}
               </section>
 
+              {Object.hasOwn(activeInvestigations, selectedCitation.id) && <section className={styles.investigatorCard} aria-live="polite">
+                <h3>Searching the web…</h3>
+                <p>PinCite is looking for an official source before reaching an existence result.</p>
+                {activeInvestigations[selectedCitation.id] ? <iframe
+                  className={styles.liveView}
+                  referrerPolicy="no-referrer"
+                  src={activeInvestigations[selectedCitation.id] ?? undefined}
+                  title="Live investigator browser session"
+                /> : <p className={styles.muted}>Opening the investigator&apos;s browser session…</p>}
+              </section>}
+
               {selectedQuoteFinding && <section className={styles.diffCard} aria-labelledby="diff-heading">
                 <h3 id="diff-heading">Quote comparison</h3>
                 <VerdictBadge verdict={selectedQuoteFinding.verdict} />
@@ -510,7 +554,7 @@ export default function Home() {
               {selectedPropositionFinding && <section className={styles.rationaleCard} aria-labelledby="rationale-heading">
                 <h3 id="rationale-heading">Proposition support</h3>
                 <VerdictBadge verdict={selectedPropositionFinding.verdict} />
-                <p>{selectedPropositionFinding.rationale ?? "Pincite could not provide a rationale from the available source evidence."}</p>
+                <p>{selectedPropositionFinding.rationale ?? "PinCite could not provide a rationale from the available source evidence."}</p>
                 {propositionParagraphIds.length > 0 && <p className={styles.evidenceLinks}>
                   <strong>Source passages:</strong>{" "}
                   {propositionParagraphIds.map((paragraphId, index) => <span key={paragraphId}>
@@ -525,6 +569,11 @@ export default function Home() {
               </section>}
 
               <p className={styles.sourceStatus} aria-live="polite">{sourceStatus}</p>
+              {source?.provenance && <section className={styles.provenance} aria-label="Source provenance">
+                <strong>Retrieved from:</strong>{" "}
+                {source.provenance.url ? <a href={source.provenance.url} rel="noreferrer" target="_blank">{source.provenance.url}</a> : <span>stored source record</span>}
+                <span> · {source.provenance.method.replaceAll("_", " ")}</span>
+              </section>}
               {source && <div className={styles.sourceText}>
                 {source.paragraphs.map((paragraph) => <p className={activeParagraphIds.has(paragraph.id) ? styles.activeParagraph : undefined} id={`source-paragraph-${paragraph.id}`} key={paragraph.id}>
                   <span className={styles.paragraphMarker}>¶ {paragraph.para_no}{paragraph.page ? ` · p. ${paragraph.page}` : ""}</span>

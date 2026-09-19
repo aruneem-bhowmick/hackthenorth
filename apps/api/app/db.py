@@ -107,6 +107,9 @@ class Citation(Base):
     findings: Mapped[list["Finding"]] = relationship(
         back_populates="citation", cascade="all, delete-orphan", passive_deletes=True
     )
+    investigator_runs: Mapped[list["InvestigatorRun"]] = relationship(
+        back_populates="citation", cascade="all, delete-orphan", passive_deletes=True
+    )
     source_acquisition: Mapped["SourceAcquisition | None"] = relationship(back_populates="citations")
 
 
@@ -158,6 +161,9 @@ class Source(Base):
     paragraphs: Mapped[list["SourceParagraph"]] = relationship(
         back_populates="source", cascade="all, delete-orphan", passive_deletes=True
     )
+    provenance: Mapped["Provenance | None"] = relationship(
+        back_populates="source", uselist=False, cascade="all, delete-orphan", passive_deletes=True
+    )
 
 
 class SourceParagraph(Base):
@@ -195,6 +201,49 @@ class SourceAcquisition(Base):
     retrieved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     citations: Mapped[list[Citation]] = relationship(back_populates="source_acquisition")
+
+
+class Provenance(Base):
+    """Auditable retrieval metadata for one stored source (FR-PRV-001)."""
+
+    __tablename__ = "provenance"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("sources.id", ondelete="CASCADE"), nullable=False, unique=True, index=True
+    )
+    url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Kept open-ended so additional traceable retrieval mechanisms do not
+    # require a schema migration (SPEC.md FR-PRV-001).
+    method: Mapped[str] = mapped_column(String(64), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    snapshot_ref: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    session_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    source: Mapped[Source] = relationship(back_populates="provenance")
+
+
+class InvestigatorRun(Base):
+    """Durable state for the bounded fallback investigation of one citation."""
+
+    __tablename__ = "investigator_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    # P3 launches at most one durable run per citation; task retries resume
+    # this row rather than creating a second billable browser session.
+    citation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("citations.id", ondelete="CASCADE"), nullable=False, unique=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
+    searches: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fetches: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    live_view_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    outcome: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+    citation: Mapped[Citation] = relationship(back_populates="investigator_runs")
 
 
 class LookupCache(Base):

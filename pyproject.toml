@@ -15,6 +15,7 @@ members = [
 [tool.uv.sources]
 pincite-pipeline = { workspace = true }
 pincite-verdicts = { workspace = true }
+pincite-investigator = { workspace = true }
 
 [dependency-groups]
 dev = [

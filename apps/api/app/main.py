@@ -25,7 +25,7 @@ if settings.sentry_dsn_api:
         send_default_pii=False,
     )
 
-app = FastAPI(title="Pincite API")
+app = FastAPI(title="PinCite API")
 
 app.add_middleware(
     CORSMiddleware,

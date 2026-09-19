@@ -1,6 +1,6 @@
 """Best-effort Elastic indexing for P2's paragraph and finding analytics.
 
-Postgres remains Pincite's source of truth.  These helpers are intentionally
+Postgres remains PinCite's source of truth.  These helpers are intentionally
 side-effect-only adapters: callers catch :class:`ElasticUnavailable` and
 continue the durable P1/P2 review flow when Elastic or its credentials are
 absent.  They contain no verdict logic.

@@ -95,6 +95,16 @@ class SourceParagraphResponse(BaseModel):
     text: str
 
 
+class ProvenanceResponse(BaseModel):
+    id: uuid.UUID
+    url: str | None
+    retrieved_at: datetime
+    method: str
+    sha256: str
+    snapshot_ref: str | None
+    session_ref: str | None
+
+
 class SourceResponse(BaseModel):
     id: uuid.UUID
     kind: str
@@ -105,10 +115,7 @@ class SourceResponse(BaseModel):
     external_id: str | None
     text: str | None
     paragraphs: list[SourceParagraphResponse] = Field(default_factory=list)
-    # Full auditable provenance (URL, hash, snapshot and retrieval method) is
-    # explicitly P3 scope.  Returning null is intentionally more honest than
-    # manufacturing an incomplete provenance record in P1.
-    provenance: None = None
+    provenance: ProvenanceResponse | None = None
 
 
 # Typed P1 SSE payloads.  The worker publishes their JSON representation; the

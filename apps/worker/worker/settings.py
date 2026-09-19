@@ -9,6 +9,7 @@ from arq.connections import RedisSettings
 from worker.config import get_settings
 from worker.tasks import (
     process_citation,
+    process_investigation,
     process_job,
     process_proposition,
     process_quote,
@@ -29,7 +30,14 @@ if _settings.sentry_dsn_worker:
 
 
 class WorkerSettings:
-    functions = [process_job, process_citation, process_source, process_quote, process_proposition]
+    functions = [
+        process_job,
+        process_citation,
+        process_source,
+        process_quote,
+        process_proposition,
+        process_investigation,
+    ]
     redis_settings = RedisSettings.from_dsn(_settings.redis_url)
     on_startup = startup
     on_shutdown = shutdown

@@ -20,7 +20,7 @@ _MINIMAL_PDF = (
     b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
     b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n"
     b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
-    b"5 0 obj\n<< /Length 48 >>\nstream\nBT /F1 12 Tf 72 720 Td (Pincite smoke test.) Tj ET\nendstream\nendobj\n"
+    b"5 0 obj\n<< /Length 48 >>\nstream\nBT /F1 12 Tf 72 720 Td (PinCite smoke test.) Tj ET\nendstream\nendobj\n"
     b"xref\n0 6\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \n0000000241 00000 n \n0000000311 00000 n \n"
     b"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n411\n%%EOF\n"
 )

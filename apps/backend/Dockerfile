@@ -14,10 +14,11 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 COPY apps/api ./apps/api
 COPY apps/worker ./apps/worker
+COPY apps/investigator ./apps/investigator
 COPY packages/pipeline ./packages/pipeline
 COPY packages/verdicts ./packages/verdicts
 COPY config ./config
-RUN uv sync --no-dev --package pincite-api --package pincite-worker
+RUN uv sync --no-dev --package pincite-api --package pincite-worker --package pincite-investigator
 
 COPY apps/backend/start.sh /usr/local/bin/pincite-start
 # Git may materialize this file with CRLF on Windows.  Normalize it inside the

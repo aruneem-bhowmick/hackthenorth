@@ -79,6 +79,26 @@ materially changed count invalidates this baseline. This file is for the
 deployment/P1-gate smoke test only—not a finding of misconduct and not the
 flagship sanctions-case demonstration.
 
+## 4. Day v. Plumber's Shop & Assoc. LLC — P3 known-missing recovery fixture
+
+- **Citation:** 2025 NY Slip Op 51938(U) [87 Misc. 3d 1248(A)].
+- **Court/date:** Supreme Court, New York County, September 16, 2025.
+- **Official opinion:**
+  `https://www.nycourts.gov/reporter/3dseries/2025/2025_51938.htm`
+  (published by the New York State Law Reporting Bureau pursuant to Judiciary
+  Law §431).
+- **CourtListener check, re-verified 2026-09-19:** an authenticated
+  citation-lookup request for `2025 NY Slip Op 51938(U)` returned `404` with
+  no clusters. This is a real P3 `NOT_IN_DATABASE` trigger, not an invented
+  missing authority.
+- **Access-control preparation:** the exact official host
+  `www.nycourts.gov` is allowlisted in `config/allowlist.yaml`; no broad
+  wildcard was added.
+- **Demo caveat:** ordinary browser-session handling retrieves the page with
+  HTTP 200, while a bare stateless request may receive a Cloudflare 403. A
+  live Browserbase / Stagehand spike must still succeed before this is claimed
+  as an exit-gate-ready demo run.
+
 ## Dropped: Adams v. Matrix Providers Inc.
 
 No. 1:23-cv-01996, D. Colorado. Charlotin database lists a 2026-08-27

@@ -2,7 +2,14 @@ from types import SimpleNamespace
 import uuid
 
 from worker.courtlistener import CitationLookup
-from worker.tasks import _batch_text, _citation_batches, _lookup_payloads_for_batch
+from worker.tasks import (
+    _batch_text,
+    _citation_batches,
+    _citation_asserted_year,
+    _disambiguate_clusters,
+    _investigator_context,
+    _lookup_payloads_for_batch,
+)
 
 
 def _citation(raw_text: str) -> SimpleNamespace:
@@ -55,3 +62,64 @@ def test_citation_batches_obey_shared_minute_quota() -> None:
     batches = _citation_batches(citations)
 
     assert [len(batch) for batch in batches] == [60, 1]
+
+
+def test_ambiguous_clusters_are_disambiguated_only_by_exact_name_and_year() -> None:
+    citation = SimpleNamespace(case_name="Lessee of Hyam v. Edwards", year_hint=1759)
+    matching = {"case_name": "Lessee of Hyam v. Edwards", "date_filed": "1759-04-15"}
+    same_name_wrong_year = {
+        "case_name": "Lessee of Hyam v. Edwards",
+        "date_filed": "1754-09-15",
+    }
+    other_case = {"case_name": "Anonymous", "date_filed": "1759-04-15"}
+
+    assert _disambiguate_clusters(
+        citation, [matching, same_name_wrong_year, other_case]
+    ) == [matching]
+
+
+def test_ambiguous_clusters_without_a_case_name_stay_ambiguous() -> None:
+    citation = SimpleNamespace(case_name=None, year_hint=1759)
+    assert _disambiguate_clusters(citation, [{"case_name": "Anonymous"}]) == []
+
+
+def test_investigator_context_uses_the_configured_new_york_official_resolver() -> None:
+    citation = SimpleNamespace(
+        raw_text="Day v. Plumber's Shop & Assoc. LLC, 2025 NY Slip Op 51938(U)",
+        case_name="Day v. Plumber's Shop & Assoc. LLC",
+        court_hint=None,
+        year_hint=2025,
+    )
+
+    context = _investigator_context(citation)
+
+    assert context.official_search_domain == "www.nycourts.gov"
+    assert [candidate.url for candidate in context.direct_official_candidates] == [
+        "https://www.nycourts.gov/reporter/3dseries/2025/2025_51938.htm"
+    ]
+
+
+def test_investigator_context_uses_one_explicit_citation_year_when_parser_omits_it() -> (
+    None
+):
+    """Reporter-only citations still require source-side year corroboration."""
+
+    citation = SimpleNamespace(
+        raw_text="2025 NY Slip Op 51938(U)",
+        case_name="Day v. Plumber's Shop & Assoc. LLC",
+        court_hint=None,
+        year_hint=None,
+    )
+
+    context = _investigator_context(citation)
+
+    assert context.year == 2025
+    assert [candidate.url for candidate in context.direct_official_candidates] == [
+        "https://www.nycourts.gov/reporter/3dseries/2025/2025_51938.htm"
+    ]
+
+
+def test_citation_asserted_year_rejects_an_ambiguous_or_missing_value() -> None:
+    assert _citation_asserted_year("2025 NY Slip Op 51938(U)") == 2025
+    assert _citation_asserted_year("2024 and 2025 NY Slip Op") is None
+    assert _citation_asserted_year("347 U.S. 483") is None

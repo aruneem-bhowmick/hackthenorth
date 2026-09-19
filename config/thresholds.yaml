@@ -17,6 +17,19 @@ investigator:             # SPEC.md FR-INV-007 per-run budget
   max_searches: 3
   max_fetches: 5
   max_wall_time_seconds: 90
+  # ADR-013: normalised case-name similarity must be corroborated by court,
+  # year, or docket number before a recovered source is accepted.
+  name_similarity_threshold: 0.80
+  # The final discovery query stays within max_searches and is restricted to
+  # an official host selected from the citation's court hint. Extend this map
+  # deliberately as verified state-court sources are added to the eval set.
+  official_search_domains:
+    - court_hint: "new york"
+      domain: www.nycourts.gov
+    - court_hint: "n.y."
+      domain: www.nycourts.gov
+    - citation_marker: "ny slip op"
+      domain: www.nycourts.gov
 
 retrieval:                # SPEC.md FR-PRP-001
   top_k_paragraphs: 6

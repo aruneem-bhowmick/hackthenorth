@@ -1,0 +1,8 @@
+# Discovery aids only: every derived URL still passes CON-ACC, Stagehand
+# extraction, and FR-INV-005 before it may become evidence. Add a rule only
+# after verifying stable official URL grammar and a known-missing fixture.
+# Docket/filing URL resolvers remain P5 scope.
+resolvers:
+  - name: ny_reporter_3d
+    citation_pattern: '(?<!\d)(?P<year>\d{4})\s+N\.?(?:Y\.?|Y)\s+Slip\s+Op\s+(?P<number>\d+)(?:\([A-Z]\))?'
+    url_template: 'https://www.nycourts.gov/reporter/3dseries/{year}/{year}_{number}.htm'

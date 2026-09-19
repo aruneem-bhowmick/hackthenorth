@@ -13,8 +13,10 @@ dependencies = [
     "truststore>=0.9",
     "httpx>=0.27",
     "elasticsearch>=8.15",
+    "pyyaml>=6.0",
     "pincite-pipeline",
     "pincite-verdicts",
+    "pincite-investigator",
 ]
 
 [build-system]
