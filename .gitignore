@@ -1,2 +1,31 @@
 # Internal documentation
 docs/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+
+# Node / Next.js
+node_modules/
+.next/
+apps/web/.env*.local
+
+# Uploaded briefs / local object storage (never committed — NFR-PRIV-001)
+data/uploads/
+
+# Sentry
+.sentryclirc
+
+# Machine-local TLS-interception root CA (e.g. Norton SSL scanning) needed to
+# make `docker compose build` work on THIS host — not a product secret, not
+# portable to other machines/CI/deploy targets. See apps/api/Dockerfile.
+certs/*
+!certs/.gitkeep

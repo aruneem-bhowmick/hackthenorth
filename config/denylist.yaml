@@ -1,0 +1,11 @@
+# Domains the investigator (apps/investigator, P3) must never fetch from,
+# regardless of allowlist.yaml. CON-ACC-002 (SPEC.md §10) — takes precedence.
+# Not read by any code yet in P0; exists per the repo layout (SPEC.md §15).
+
+domains:
+  - "pacer.*"
+  - "ecf.*"
+  - scholar.google.com   # terms prohibit automated access (SPEC.md §10, §4 CON-ACC-002)
+
+# INV-4 (SPEC.md §11.3, CI-blocking once the investigator exists): no fetch
+# may target a denylisted or non-allowlisted domain.

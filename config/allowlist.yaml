@@ -1,0 +1,14 @@
+# Domains the investigator (apps/investigator, P3) is permitted to fetch from.
+# CON-ACC-001 (SPEC.md §10). Not read by any code yet in P0 — the investigator
+# doesn't run until P3 — but the file exists per the repo layout (SPEC.md §15).
+#
+# Denylist (config/denylist.yaml) takes precedence over this list (CON-ACC-002).
+
+domains:
+  - supremecourt.gov
+  - "*.uscourts.gov"      # federal court opinion pages
+  - uscode.house.gov
+  - ecfr.gov
+  # State judiciary domains: SPEC.md names this category but not specific
+  # domains ("state judiciary domains"). Populate per-state entries here as
+  # the demo brief set (P0 risk-mitigation candidates, §13) is finalised.

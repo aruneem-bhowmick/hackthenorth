@@ -1,0 +1,10 @@
+.git
+docs
+data
+apps/web
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+node_modules
+.next

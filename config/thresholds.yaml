@@ -1,0 +1,22 @@
+# Default verdict thresholds from SPEC.md §6. Not read by any code yet in
+# P0 (quote fidelity is P1, proposition support is P2) — exists per the repo
+# layout (SPEC.md §15). SPEC.md §12 requires these be calibrated on half the
+# evaluation set and reported on the other half in P4; any change here
+# requires an ADR (SPEC.md header, change control).
+
+quote_fidelity:          # SPEC.md §6.2
+  verbatim_similarity: 0.97          # >= this -> VERBATIM / VERBATIM_WITH_PERMITTED_ALTERATIONS
+  altered_similarity_min: 0.80       # 0.80-0.97 -> ALTERED
+  paraphrase_semantic_similarity: 0.85  # below 0.80 alignment but >= this semantic sim -> PARAPHRASE_IN_QUOTES
+
+proposition_support:     # SPEC.md §6.3
+  confidence_min: 0.6                # below this -> UNVERIFIABLE
+  contradicts_confidence_min: 0.75   # CONTRADICTS needs a higher bar than other verdicts
+
+investigator:             # SPEC.md FR-INV-007 per-run budget
+  max_searches: 3
+  max_fetches: 5
+  max_wall_time_seconds: 90
+
+retrieval:                # SPEC.md FR-PRP-001
+  top_k_paragraphs: 6
