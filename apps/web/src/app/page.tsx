@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import styles from "./page.module.css";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -57,6 +57,8 @@ type DiffItem = {
   quote_tokens: string[];
   source_tokens: string[];
 };
+type CitationSpan = { id: string; start: number; end: number };
+type BriefPage = { page: number; text: string; citations: CitationSpan[] };
 
 function verdictDetails(verdict?: string) {
   const details: Record<string, { label: string; tone: "green" | "yellow" | "red" | "grey" }> = {
@@ -134,6 +136,45 @@ function readDiff(finding: Finding | null): DiffItem[] {
   });
 }
 
+function AnnotatedPage({
+  page,
+  citationsById,
+  selectedCitationId,
+  onCitation,
+}: {
+  page: BriefPage;
+  citationsById: Map<string, Citation>;
+  selectedCitationId: string | null;
+  onCitation: (citation: Citation) => void;
+}) {
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  for (const span of [...page.citations].sort((left, right) => left.start - right.start || right.end - left.end)) {
+    const start = Math.max(cursor, Math.min(span.start, page.text.length));
+    const end = Math.max(start, Math.min(span.end, page.text.length));
+    if (start > cursor) parts.push(page.text.slice(cursor, start));
+    const citation = citationsById.get(span.id);
+    const tone = citation ? worstTone(citation.findings) : "grey";
+    parts.push(citation ? (
+      <button
+        aria-pressed={span.id === selectedCitationId}
+        className={`${styles.briefHighlight} ${styles[`tone${tone[0].toUpperCase()}${tone.slice(1)}`]}`}
+        key={span.id}
+        onClick={() => onCitation(citation)}
+        type="button"
+      >
+        {page.text.slice(start, end)}
+      </button>
+    ) : <mark className={styles.briefPending} key={span.id}>{page.text.slice(start, end)}</mark>);
+    cursor = end;
+  }
+  if (cursor < page.text.length) parts.push(page.text.slice(cursor));
+  return <section className={styles.briefPage} aria-label={`Extracted page ${page.page}`}>
+    <h3>Page {page.page}</h3>
+    <div className={styles.briefText}>{parts}</div>
+  </section>;
+}
+
 export default function Home() {
   const [mode, setMode] = useState<Mode>("before_filing");
   const [file, setFile] = useState<File | null>(null);
@@ -141,6 +182,7 @@ export default function Home() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [jobStatus, setJobStatus] = useState("Ready for a PDF");
   const [citations, setCitations] = useState<Citation[]>([]);
+  const [briefPages, setBriefPages] = useState<BriefPage[]>([]);
   const [selectedCitationId, setSelectedCitationId] = useState<string | null>(null);
   const [source, setSource] = useState<Source | null>(null);
   const [sourceStatus, setSourceStatus] = useState("Select a citation to inspect its source.");
@@ -153,6 +195,7 @@ export default function Home() {
     [citations, selectedCitationId],
   );
   const selectedQuoteFinding = quoteFinding(selectedCitation);
+  const citationsById = useMemo(() => new Map(citations.map((citation) => [citation.id, citation])), [citations]);
 
   useEffect(() => {
     return () => {
@@ -167,6 +210,15 @@ export default function Home() {
     const data = (await response.json()) as { citations: Citation[] };
     setCitations(data.citations);
     setSelectedCitationId((current) => current ?? data.citations[0]?.id ?? null);
+  }
+
+  async function refreshBriefPages(activeJobId: string, reviewToken: string) {
+    const response = await fetch(`${API_BASE}/api/jobs/${activeJobId}/pages`, {
+      headers: { "X-Pincite-Review-Token": reviewToken },
+    });
+    if (!response.ok) throw new Error(`Could not load extracted brief text (HTTP ${response.status}).`);
+    const data = (await response.json()) as { pages: BriefPage[] };
+    setBriefPages(data.pages);
   }
 
   async function loadSource(citation: Citation) {
@@ -196,7 +248,7 @@ export default function Home() {
     }
   }
 
-  function connectEvents(activeJobId: string) {
+  function connectEvents(activeJobId: string, reviewToken: string) {
     eventSource.current?.close();
     const stream = new EventSource(`${API_BASE}/api/jobs/${activeJobId}/events`);
     eventSource.current = stream;
@@ -208,6 +260,7 @@ export default function Home() {
     stream.addEventListener("citations.extracted", () => {
       setJobStatus("Citations extracted — source checks are running.");
       void refreshCitations(activeJobId).catch((refreshError: unknown) => setError(String(refreshError)));
+      void refreshBriefPages(activeJobId, reviewToken).catch((refreshError: unknown) => setError(String(refreshError)));
     });
     stream.addEventListener("finding.created", () => {
       setJobStatus("A citation result just arrived.");
@@ -238,6 +291,7 @@ export default function Home() {
     }
     setError(null);
     setCitations([]);
+    setBriefPages([]);
     setSelectedCitationId(null);
     setSource(null);
     setSourceStatus("Citations will appear here as they are extracted.");
@@ -249,10 +303,10 @@ export default function Home() {
     try {
       const response = await fetch(`${API_BASE}/api/jobs`, { method: "POST", body });
       if (!response.ok) throw new Error(`Upload failed (HTTP ${response.status}).`);
-      const data = (await response.json()) as { job_id: string };
+      const data = (await response.json()) as { job_id: string; review_token: string };
       setJobId(data.job_id);
       setJobStatus("Brief uploaded — preparing review.");
-      connectEvents(data.job_id);
+      connectEvents(data.job_id, data.review_token);
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "The upload could not be completed.");
       setJobStatus("Ready for a PDF");
@@ -315,11 +369,15 @@ export default function Home() {
             <span>{citations.length} citation{citations.length === 1 ? "" : "s"}</span>
           </div>
 
-          {briefUrl ? (
-            <object aria-label="Uploaded PDF brief" className={styles.pdfPreview} data={briefUrl} type="application/pdf">
-              <p>Your browser cannot preview this PDF. The citation list below remains available.</p>
-            </object>
-          ) : <p className={styles.emptyState}>Your selected PDF will remain in this browser while you review its citations.</p>}
+          {briefPages.length ? <div className={styles.annotatedBrief}>
+            {briefPages.map((page) => <AnnotatedPage
+              citationsById={citationsById}
+              key={page.page}
+              onCitation={(citation) => void loadSource(citation)}
+              page={page}
+              selectedCitationId={selectedCitationId}
+            />)}
+          </div> : <p className={styles.emptyState}>{file ? "Extracting reviewable text and citation spans…" : "Upload a brief to view its annotated text."}</p>}
 
           <div className={styles.citationList} aria-label="Extracted citations">
             {citations.map((citation) => {
