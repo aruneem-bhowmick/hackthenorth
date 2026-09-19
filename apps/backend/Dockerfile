@@ -20,7 +20,10 @@ COPY config ./config
 RUN uv sync --no-dev --package pincite-api --package pincite-worker
 
 COPY apps/backend/start.sh /usr/local/bin/pincite-start
-RUN chmod +x /usr/local/bin/pincite-start
+# Git may materialize this file with CRLF on Windows.  Normalize it inside the
+# Linux image so the /bin/sh shebang is executable on every deployment host.
+RUN sed -i 's/\r$//' /usr/local/bin/pincite-start \
+    && chmod +x /usr/local/bin/pincite-start
 
 EXPOSE 8000
 CMD ["/usr/local/bin/pincite-start"]
