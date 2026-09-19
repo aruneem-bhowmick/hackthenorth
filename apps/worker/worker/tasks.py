@@ -268,7 +268,12 @@ async def _resolve_citation(session: Any, citation: Citation) -> None:
         client = CourtListenerClient(settings.courtlistener_api_token, acquire_rate_limit=limiter.acquire)
         lookups = await client.lookup_text(target.raw_text, expected_citations=1)
         if not lookups:
-            raise CourtListenerUnavailable("CourtListener did not return the citation")
+            citation.resolution_state = "unrecognized"
+            await _write_finding(
+                session, citation, "existence", "UNVERIFIABLE", None, ["UNRECOGNIZED_REFERENCE"], {}
+            )
+            await _write_quote_unavailable(session, citation)
+            return
         lookup = lookups[0]
         lookup_payload = {
             "citation": lookup.citation,
