@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,6 +13,7 @@ import httpx
 from verdicts import normalise
 
 MODEL = "gpt-4o-mini"
+UsageCallback = Callable[[str, int | None, int | None], None]
 
 
 class PropositionExtractionUnavailable(RuntimeError):
@@ -74,6 +75,7 @@ async def extract_propositions(
     api_key: str,
     excerpts: Sequence[PropositionExcerpt],
     client: httpx.AsyncClient | None = None,
+    on_usage: UsageCallback | None = None,
 ) -> dict[str, str | None]:
     """Make one structured call and retain only bounded, source-reproduced text."""
 
@@ -106,6 +108,13 @@ async def extract_propositions(
         raise PropositionExtractionUnavailable(f"OpenAI proposition extraction returned HTTP {response.status_code}")
     try:
         payload = response.json()
+        usage = payload.get("usage", {})
+        if on_usage is not None:
+            on_usage(
+                payload.get("model") if isinstance(payload.get("model"), str) else MODEL,
+                usage.get("prompt_tokens") if isinstance(usage, dict) and isinstance(usage.get("prompt_tokens"), int) else None,
+                usage.get("completion_tokens") if isinstance(usage, dict) and isinstance(usage.get("completion_tokens"), int) else None,
+            )
         content = payload["choices"][0]["message"]["content"]
         parsed = json.loads(content)
     except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:

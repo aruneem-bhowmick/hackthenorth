@@ -11,6 +11,7 @@ from worker.tasks import (
     process_citation,
     process_investigation,
     process_job,
+    process_page_signals,
     process_proposition,
     process_quote,
     process_source,
@@ -25,6 +26,8 @@ if _settings.sentry_dsn_worker:
         dsn=_settings.sentry_dsn_worker,
         environment=_settings.sentry_environment,
         traces_sample_rate=1.0,
+        profiles_sample_rate=1.0,
+        enable_logs=True,
         send_default_pii=False,
     )
 
@@ -33,6 +36,7 @@ class WorkerSettings:
     functions = [
         process_job,
         process_citation,
+        process_page_signals,
         process_source,
         process_quote,
         process_proposition,

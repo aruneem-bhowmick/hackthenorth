@@ -30,8 +30,11 @@ Attorney's Office to appear at a show-cause hearing").
   `https://www.courtlistener.com/docket/71231282/119/fivehouse-v-us-department-of-defense/`
 - **Availability:** all four documents confirmed `is_available: true` via
   the CourtListener API — free on RECAP, not PACER-gated.
-- **Citation count:** not yet extracted — first real exercise for FR-EXT-001
-  once eyecite is wired up in P1.
+- **P4 pilot eval label:** ground truth extracted and independently
+  cross-verified 2026-09-19 (see `eval/labels/fivehouse.yaml`). Three real
+  cases (`556 F.3d 177`, `637 F.3d 259`, `899 F.3d 260`) are quoted or
+  characterized inaccurately in D.E. 86; two (`411 U.S. 138`, `401 U.S. 402`)
+  are cited accurately and serve as negative controls.
 
 ## 2. Cole v. Amain.com, Inc. — strong backup candidate
 
@@ -53,7 +56,14 @@ Attorney's Office to appear at a show-cause hearing").
   referral to the Illinois Attorney Registration and Disciplinary
   Commission.
 - **Availability:** D.E. 25 and D.E. 27 confirmed `is_available: true`.
-- **Citation count:** not yet extracted.
+- **P4 pilot eval label:** ground truth extracted and independently
+  cross-verified 2026-09-19 (see `eval/labels/cole.yaml`). Two citations
+  (`337 F.R.D. 659`, `249 F. Supp. 3d 676`) are genuinely fabricated —
+  confirmed HTTP 404 on CourtListener's citation-lookup, matching the
+  court's own footnoted "could not be located on either Lexis or Westlaw."
+  Three real cases are cited for propositions they do not support
+  (`998 F.3d 772`, `430 F.3d 432`, `546 F.3d 918`); three more are cited
+  accurately and serve as negative controls.
 
 ## 3. International Partners for Ethical Care v. Ferguson — P1 final smoke brief
 
@@ -98,6 +108,21 @@ flagship sanctions-case demonstration.
   HTTP 200, while a bare stateless request may receive a Cloudflare 403. A
   live Browserbase / Stagehand spike must still succeed before this is claimed
   as an exit-gate-ready demo run.
+
+## P4 pilot evaluation set (scope note)
+
+`eval/labels/*.yaml` holds hand-labelled, cross-verified ground truth for
+Fivehouse and Cole above — the two candidates with a court order that names
+specific citation-level problems. SPEC.md §12 targets 10-15 labelled
+positives, 5-10 negatives, and 5 known-missing cases; this pilot set has 2
+positives (with negative controls embedded in each) and 1 known-missing
+fixture (Day v. Plumber's Shop, above). This is a deliberate scope decision,
+not an oversight — sourcing and hand-verifying real court filings at SPEC's
+target scale is substantial research time this session prioritized against
+shipping a working, honestly-labelled pilot instead. The P4 evaluation page
+presents these results labelled explicitly as a pilot-scale set, consistent
+with `OVERVIEW.md`'s "honesty about uncertainty" value, rather than
+overstating coverage.
 
 ## Dropped: Adams v. Matrix Providers Inc.
 

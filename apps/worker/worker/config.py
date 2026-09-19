@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     sentry_environment: str = "development"
     courtlistener_api_token: str | None = None
     openai_api_key: str | None = None
+    # P4 keeps this credential in the worker, where provider calls occur.
+    # It is passed explicitly to the GPTZero client and never reaches a browser.
+    gptzero_api_key: str | None = None
     # P2 paragraph indexing/retrieval is deliberately optional.  The worker
     # keeps P1's Postgres-backed review flow available when Elastic has not
     # yet been provisioned (or is temporarily unavailable).

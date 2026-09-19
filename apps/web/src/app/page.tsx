@@ -1,6 +1,10 @@
 "use client";
 
 import { ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { ExportButtons } from "../components/export-buttons";
+import { CitationSignals, Signal, SignalHeatStrip } from "../components/signal-display";
+import { CheckFilter, citationMatchesFilters, SummaryPanel, ToneFilter } from "../components/summary-panel";
 import styles from "./page.module.css";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -38,6 +42,7 @@ type Citation = {
   source_state: "queued" | "fetching" | "fetched" | "unavailable" | null;
   claims: Claim[];
   findings: Finding[];
+  signals: Signal[];
 };
 type SourceParagraph = {
   id: string;
@@ -204,11 +209,13 @@ function AnnotatedPage({
   citationsById,
   selectedCitationId,
   onCitation,
+  signals,
 }: {
   page: BriefPage;
   citationsById: Map<string, Citation>;
   selectedCitationId: string | null;
   onCitation: (citation: Citation) => void;
+  signals: Signal[];
 }) {
   const parts: ReactNode[] = [];
   let cursor = 0;
@@ -233,6 +240,7 @@ function AnnotatedPage({
   }
   if (cursor < page.text.length) parts.push(page.text.slice(cursor));
   return <section className={styles.briefPage} aria-label={`Extracted page ${page.page}`}>
+    <SignalHeatStrip page={page.page} signals={signals} />
     <h3>Page {page.page}</h3>
     <div className={styles.briefText}>{parts}</div>
   </section>;
@@ -246,13 +254,17 @@ export default function Home() {
   const [jobStatus, setJobStatus] = useState("Ready for a PDF");
   const [citations, setCitations] = useState<Citation[]>([]);
   const [briefPages, setBriefPages] = useState<BriefPage[]>([]);
+  const [pageSignals, setPageSignals] = useState<Signal[]>([]);
   const [selectedCitationId, setSelectedCitationId] = useState<string | null>(null);
   const [source, setSource] = useState<Source | null>(null);
   const [activeInvestigations, setActiveInvestigations] = useState<Record<string, string | null>>({});
   const [activeParagraphIds, setActiveParagraphIds] = useState<Set<string>>(() => new Set());
   const [sourceStatus, setSourceStatus] = useState("Select a citation to inspect its source.");
   const [error, setError] = useState<string | null>(null);
+  const [checkFilter, setCheckFilter] = useState<CheckFilter>("all");
+  const [toneFilter, setToneFilter] = useState<ToneFilter>("all");
   const eventSource = useRef<EventSource | null>(null);
+  const signalRefreshTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const sourcePane = useRef<HTMLDivElement | null>(null);
 
   const selectedCitation = useMemo(
@@ -262,10 +274,15 @@ export default function Home() {
   const selectedQuoteFinding = quoteFinding(selectedCitation);
   const selectedPropositionFinding = propositionFinding(selectedCitation);
   const citationsById = useMemo(() => new Map(citations.map((citation) => [citation.id, citation])), [citations]);
+  const filteredCitations = useMemo(
+    () => citations.filter((citation) => citationMatchesFilters(citation, checkFilter, toneFilter, (verdict) => verdictDetails(verdict).tone)),
+    [citations, checkFilter, toneFilter],
+  );
 
   useEffect(() => {
     return () => {
       eventSource.current?.close();
+      if (signalRefreshTimer.current) clearInterval(signalRefreshTimer.current);
       if (briefUrl) URL.revokeObjectURL(briefUrl);
     };
   }, [briefUrl]);
@@ -273,9 +290,11 @@ export default function Home() {
   async function refreshCitations(activeJobId: string) {
     const response = await fetch(`${API_BASE}/api/jobs/${activeJobId}/citations`);
     if (!response.ok) throw new Error(`Could not refresh citations (HTTP ${response.status}).`);
-    const data = (await response.json()) as { citations: Citation[] };
-    setCitations(data.citations);
-    setSelectedCitationId((current) => current ?? data.citations[0]?.id ?? null);
+    const data = (await response.json()) as { citations: Citation[]; page_signals?: Signal[] };
+    const nextCitations = data.citations.map((citation) => ({ ...citation, signals: citation.signals ?? [] }));
+    setCitations(nextCitations);
+    setPageSignals(data.page_signals ?? []);
+    setSelectedCitationId((current) => current ?? nextCitations[0]?.id ?? null);
   }
 
   async function refreshBriefPages(activeJobId: string, reviewToken: string) {
@@ -334,6 +353,7 @@ export default function Home() {
 
   function connectEvents(activeJobId: string, reviewToken: string) {
     eventSource.current?.close();
+    if (signalRefreshTimer.current) clearInterval(signalRefreshTimer.current);
     const stream = new EventSource(`${API_BASE}/api/jobs/${activeJobId}/events`);
     eventSource.current = stream;
 
@@ -345,6 +365,12 @@ export default function Home() {
       setJobStatus("Citations extracted — source checks are running.");
       void refreshCitations(activeJobId).catch((refreshError: unknown) => setError(String(refreshError)));
       void refreshBriefPages(activeJobId, reviewToken).catch((refreshError: unknown) => setError(String(refreshError)));
+      // Signal tasks are intentionally independent and have no SSE event:
+      // poll the already-existing citations contract only while this job is
+      // active so a signal can appear even if no later finding is written.
+      signalRefreshTimer.current = setInterval(() => {
+        void refreshCitations(activeJobId).catch((refreshError: unknown) => setError(String(refreshError)));
+      }, 5_000);
     });
     stream.addEventListener("finding.created", () => {
       setJobStatus("A citation result just arrived.");
@@ -373,6 +399,7 @@ export default function Home() {
       stream.addEventListener(terminalEvent, () => {
         setJobStatus(terminalEvent === "job.completed" ? "Review complete" : "Review ended with an issue");
         void refreshCitations(activeJobId).catch((refreshError: unknown) => setError(String(refreshError)));
+        if (signalRefreshTimer.current) clearInterval(signalRefreshTimer.current);
         stream.close();
       });
     }
@@ -395,6 +422,7 @@ export default function Home() {
     setError(null);
     setCitations([]);
     setBriefPages([]);
+    setPageSignals([]);
     setSelectedCitationId(null);
     setSource(null);
     setActiveInvestigations({});
@@ -428,7 +456,10 @@ export default function Home() {
           <p className={styles.eyebrow}>PinCite · Citation review</p>
           <h1>Check cited authority against the source text.</h1>
         </div>
-        <p className={styles.disclaimer}>PinCite reports differences between a document and the sources it cites. It is not legal advice and does not assess anyone&apos;s intent. Always review the linked source text yourself.</p>
+        <div className={styles.headerLinks}>
+          <Link href="/eval">Evaluation</Link>
+          <p className={styles.disclaimer}>PinCite reports differences between a document and the sources it cites. It is not legal advice and does not assess anyone&apos;s intent. Always review the linked source text yourself.</p>
+        </div>
       </header>
 
       <section className={styles.uploadCard} aria-labelledby="upload-heading">
@@ -464,6 +495,19 @@ export default function Home() {
         {jobId && <code>Review {jobId.slice(0, 8)}</code>}
       </section>
 
+      <section className={styles.p4Tools}>
+        <SummaryPanel
+          checkFilter={checkFilter}
+          citations={citations}
+          labelForVerdict={(verdict) => verdictDetails(verdict).label}
+          onCheckFilter={setCheckFilter}
+          onToneFilter={setToneFilter}
+          toneFilter={toneFilter}
+          toneForVerdict={(verdict) => verdictDetails(verdict).tone}
+        />
+        <ExportButtons apiBase={API_BASE} jobId={jobId} onError={setError} />
+      </section>
+
       <section className={styles.reviewGrid} aria-label="Citation review">
         <article className={styles.briefPane}>
           <div className={styles.paneHeader}>
@@ -480,12 +524,13 @@ export default function Home() {
               key={page.page}
               onCitation={(citation) => void loadSource(citation)}
               page={page}
+              signals={pageSignals.filter((signal) => signal.section_ref === String(page.page) || signal.section_ref === `page:${page.page}`)}
               selectedCitationId={selectedCitationId}
             />)}
           </div> : <p className={styles.emptyState}>{file ? "Extracting reviewable text and citation spans…" : "Upload a brief to view its annotated text."}</p>}
 
           <div className={styles.citationList} aria-label="Extracted citations">
-            {citations.map((citation) => {
+            {filteredCitations.map((citation) => {
               const selected = citation.id === selectedCitationId;
               const tone = worstTone(citation.findings);
               return (
@@ -507,6 +552,7 @@ export default function Home() {
               );
             })}
             {jobId && citations.length === 0 && <p className={styles.emptyState}>Looking for citations. Results will appear individually as they are saved.</p>}
+            {citations.length > 0 && filteredCitations.length === 0 && <p className={styles.emptyState}>No citations match these filters.</p>}
           </div>
         </article>
 
@@ -527,6 +573,8 @@ export default function Home() {
                 {selectedCitation.claims[0]?.proposition_text && <p><strong>Point checked:</strong> {selectedCitation.claims[0].proposition_text}</p>}
                 {selectedCitation.claims[0]?.quote_text && <p><strong>Quoted in brief:</strong> “{selectedCitation.claims[0].quote_text}”</p>}
               </section>
+
+              <CitationSignals signals={selectedCitation.signals ?? []} />
 
               {Object.hasOwn(activeInvestigations, selectedCitation.id) && <section className={styles.investigatorCard} aria-live="polite">
                 <h3>Searching the web…</h3>

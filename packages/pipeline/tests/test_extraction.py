@@ -40,6 +40,41 @@ def test_unresolved_reference_is_stored_not_dropped() -> None:
     assert all(item.antecedent_id is None for item in citations)
 
 
+def test_short_form_uses_unique_reporter_key_when_case_name_span_is_truncated() -> None:
+    """A clipped full-case name must not strand an otherwise resolvable short cite."""
+
+    citations = extract_citations(
+        document(
+            "Coal. v. Aracoma Coal Co., 556 F.3d 177, 201 (4th Cir. 2009). "
+            "Ohio Valley, 556 F.3d at 201. 401 U.S. 402. "
+            "Overton Park, 401 U.S. at 415."
+        )
+    )
+
+    assert [item.kind for item in citations] == [
+        CitationKind.FULL,
+        CitationKind.SHORT,
+        CitationKind.FULL,
+        CitationKind.SHORT,
+    ]
+    assert citations[1].antecedent_id == citations[0].id
+    assert citations[3].antecedent_id == citations[2].id
+    assert citations[1].antecedent_state is AntecedentState.RESOLVED
+    assert citations[3].antecedent_state is AntecedentState.RESOLVED
+
+
+def test_short_form_reporter_fallback_preserves_ambiguity() -> None:
+    citations = extract_citations(
+        document(
+            "Alpha v. One, 401 U.S. 402 (1971). Beta v. Two, 401 U.S. 403 (1971).",
+            "Overton Park, 401 U.S. at 415.",
+        )
+    )
+
+    assert citations[-1].antecedent_id is None
+    assert citations[-1].antecedent_state is AntecedentState.UNRESOLVED
+
+
 def test_citation_spans_remain_on_the_source_page() -> None:
     raw = "Header\nRoe v. Wade, 410 U.S. 113 (1973)."
     citation = extract_citations(document(raw))[0]

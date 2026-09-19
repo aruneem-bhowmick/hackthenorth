@@ -16,6 +16,16 @@ if (process.env.NEXT_PUBLIC_SENTRY_DSN) {
     environment: process.env.NEXT_PUBLIC_SENTRY_ENVIRONMENT ?? "development",
     tracesSampleRate: 1.0,
     tracePropagationTargets: [apiOrigin],
+    // NFR-PRIV-003: review pages can render an entire brief and source text.
+    // Mask text, inputs, and media explicitly rather than relying on SDK
+    // defaults before Session Replay is enabled in production.
+    integrations: [Sentry.replayIntegration({
+      maskAllText: true,
+      maskAllInputs: true,
+      blockAllMedia: true,
+    })],
+    replaysSessionSampleRate: 0.05,
+    replaysOnErrorSampleRate: 1.0,
   });
 }
 

@@ -110,6 +110,11 @@ class Citation(Base):
     investigator_runs: Mapped[list["InvestigatorRun"]] = relationship(
         back_populates="citation", cascade="all, delete-orphan", passive_deletes=True
     )
+    # Signals are deliberately not Findings: CON-SIG-001 requires provider
+    # scores to be unable to change any legal-evidence verdict.
+    signals: Mapped[list["Signal"]] = relationship(
+        back_populates="citation", cascade="all, delete-orphan", passive_deletes=True
+    )
     source_acquisition: Mapped["SourceAcquisition | None"] = relationship(back_populates="citations")
 
 
@@ -287,6 +292,32 @@ class Finding(Base):
     )
 
     citation: Mapped[Citation] = relationship(back_populates="findings")
+
+
+class Signal(Base):
+    """Supplementary provider output, structurally separate from findings."""
+
+    __tablename__ = "signals"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    citation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("citations.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    # P4 represents a brief-page signal as e.g. ``page:3``.
+    section_ref: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    # Raw provider data is intentionally not exposed through the review API.
+    raw: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+
+    citation: Mapped["Citation | None"] = relationship(back_populates="signals")
 
 
 def default_expiry() -> datetime:

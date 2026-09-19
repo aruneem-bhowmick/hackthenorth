@@ -93,6 +93,9 @@ class Citation(Base):
     investigator_runs: Mapped[list["InvestigatorRun"]] = relationship(
         back_populates="citation", cascade="all, delete-orphan", passive_deletes=True
     )
+    signals: Mapped[list["Signal"]] = relationship(
+        back_populates="citation", cascade="all, delete-orphan", passive_deletes=True
+    )
     source_acquisition: Mapped["SourceAcquisition | None"] = relationship(back_populates="citations")
 
 
@@ -242,6 +245,30 @@ class Finding(Base):
     )
 
     citation: Mapped[Citation] = relationship(back_populates="findings")
+
+
+class Signal(Base):
+    """Supplementary provider output; never a verdict input (CON-SIG-001)."""
+
+    __tablename__ = "signals"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    citation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("citations.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    section_ref: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    raw: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+
+    citation: Mapped["Citation | None"] = relationship(back_populates="signals")
 
 
 _engine = None

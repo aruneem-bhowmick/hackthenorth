@@ -1,0 +1,144 @@
+# Labelled answer key for the Cole flagship demo brief (P4 pilot eval set).
+#
+# Ground truth sourced 2026-09-19 from D.E. 27 (Judge Sara Darrow's order,
+# 2026-07-24), which grants the underlying motion in part and separately orders
+# counsel David Baldemar Reyes to show cause for "the inclusion of fabricated
+# and inaccurate citations." Mixes both failure modes PinCite distinguishes:
+# citations that do not exist at all, and real citations used to support a
+# proposition the case does not actually stand for.
+#
+# Every existence claim below was independently re-verified against
+# CourtListener's citation-lookup API this session, not assumed from the court
+# order alone -- the two "fabricated" citations return HTTP 404 (not found);
+# every other citation listed here resolves to a real cluster.
+#
+# Same counsel (Reyes) has a prior, similar show-cause order in Hippe v.
+# Retention Brands, LLC, No. 25-CV-596, 2026 WL 1802971 (E.D. Wis. 2026-06-23)
+# -- a candidate for expanding this eval set later; not pulled into this pilot.
+
+brief: cole
+docket: "4:25-cv-04217-SLD-RLH (C.D. Ill.)"
+document: "D.E. 25 -- Plaintiff's Motion for Entry of Default Judgment"
+filed: "2026-01-27"
+source_url: "https://www.courtlistener.com/docket/71996354/25/cole-v-amaincom-inc/"
+ground_truth_sources:
+  - document: "D.E. 27 -- Order (Judge Sara Darrow, 2026-07-24)"
+    url: "https://www.courtlistener.com/recap/gov.uscourts.ilcd.98203/gov.uscourts.ilcd.98203.27.0.pdf"
+
+citations:
+  - citation: "337 F.R.D. 659"
+    case_name: "Fuller v. Athleta, LLC"
+    appears_in_brief_at: ["para. 18"]
+    expected:
+      existence: NOT_FOUND_ANYWHERE
+    issue: >
+      D.E. 27 at 11 (fn. 6): "Plaintiff's first citations in paragraphs
+      eighteen and nineteen could not be located on either Lexis or
+      Westlaw." The court deliberately withheld further detail to avoid the
+      fabricated citation entering the public record ("to avoid these
+      nonexistent citations becoming part of a published record which could
+      be cited in the future"). Independently confirmed HTTP 404 on
+      CourtListener's citation-lookup API (2026-09-19) -- genuinely
+      fabricated, not merely uncommon or unindexed.
+    severity: critical
+    confidence_note: >
+      Paragraph attribution inferred from the order's footnote 6, which
+      identifies problems by paragraph number but deliberately does not quote
+      the fabricated citations themselves. Treat the case-name/citation
+      pairing here as a well-supported inference, not a court-certified
+      verbatim quotation -- consistent with the court's own reason for
+      withholding it.
+
+  - citation: "249 F. Supp. 3d 676"
+    case_name: "Nat'l Fed'n of the Blind v. Thrustmaster of Am., Inc."
+    appears_in_brief_at: ["para. 19"]
+    expected:
+      existence: NOT_FOUND_ANYWHERE
+    issue: "Same source as above -- the second of the two citations D.E. 27 fn. 6 flags as unlocatable. Independently confirmed HTTP 404 on CourtListener."
+    severity: critical
+    confidence_note: "Same caveat as above."
+
+  - citation: "998 F.3d 772"
+    case_name: "Liebhart v. SPX Corp."
+    appears_in_brief_at: ["para. 17"]
+    expected:
+      existence: VERIFIED
+      quote_or_proposition: MISREPRESENTED
+    issue: >
+      Brief attributes a four-factor permanent-injunction test to this case:
+      "success on the merits; irreparable harm; inadequacy of legal remedies;
+      and public interest." D.E. 27 at 8 n.5 and p.11: Liebhart actually
+      applies the eBay four factors (irreparable injury; inadequacy of legal
+      remedies; balance of hardships; public interest) -- "success on the
+      merits" is not one of them and does not appear in Liebhart.
+    severity: high
+
+  - citation: "430 F.3d 432"
+    case_name: "Goodman v. Illinois Dep't of Financial & Prof'l Regulation"
+    appears_in_brief_at: ["para. 25"]
+    expected:
+      existence: AMBIGUOUS
+      quote_or_proposition: MISREPRESENTED
+    existence_note: >
+      CourtListener's citation-lookup returned HTTP 300 (ambiguous, multiple
+      candidate clusters) for "430 F.3d 432" as of 2026-09-19 -- a real case,
+      but a genuine multi-candidate resolution scenario. Useful for exercising
+      FR-RES-003 disambiguation (case name / year matching) rather than a
+      clean single-match existence check.
+    issue: >
+      Brief cites this case for "Title III of the ADA does not provide
+      compensatory or punitive damages." D.E. 27 at 11: "Goodman makes no
+      mention of the ADA -- it discusses a First Amendment challenge to the
+      Illinois Medical Practice Act."
+    severity: high
+
+  - citation: "546 F.3d 918"
+    case_name: "Sierra Club v. Franklin Cnty. Power of Ill., LLC"
+    appears_in_brief_at: ["para. 26"]
+    expected:
+      existence: VERIFIED
+      quote_or_proposition: MISREPRESENTED
+    issue: >
+      Brief cites this case for the proposition that ADA website-accessibility
+      fixes "are modest in cost relative to the harms avoided." D.E. 27 at 11:
+      "Sierra Club has nothing to do with websites, the ADA, or the costs
+      associated with altering a website; rather, it is about an
+      environmental organization seeking injunctive relief to prohibit the
+      construction of a coal power plant."
+    severity: high
+
+  - citation: "452 F. Supp. 2d 946"
+    case_name: "Nat'l Fed'n of the Blind v. Target Corp."
+    appears_in_brief_at: ["para. 19"]
+    expected:
+      existence: VERIFIED
+      quote_or_proposition: ACCURATE
+    issue: "Negative control -- the second citation in paragraph 19, not flagged by the court; real case per CourtListener (HTTP 200)."
+    severity: none
+
+  - citation: "500 F.3d 594"
+    case_name: "e360 Insight v. The Spamhaus Project"
+    appears_in_brief_at: ["para. 8", "para. 23"]
+    expected:
+      existence: VERIFIED
+      quote_or_proposition: ACCURATE
+    issue: "Negative control -- used correctly; Judge Darrow's own order (D.E. 27 at 3-4) cites this same case approvingly for the same proposition."
+    severity: none
+
+  - citation: "703 F.3d 1069"
+    case_name: "Scherr v. Marriott Int'l, Inc."
+    appears_in_brief_at: ["para. 16", "para. 21", "para. 24"]
+    expected:
+      existence: VERIFIED
+      quote_or_proposition: ACCURATE
+    issue: "Negative control -- used correctly; D.E. 27 at 8 relies on the same case for the same proposition (injunctive relief is the only Title III remedy)."
+    severity: none
+
+  - citation: "179 F.3d 557"
+    case_name: "Doe v. Mutual of Omaha Ins. Co."
+    appears_in_brief_at: ["para. 18"]
+    expected:
+      existence: VERIFIED
+      quote_or_proposition: ACCURATE
+    issue: "Negative control -- used correctly; D.E. 27 at 5 relies on the same case for the same proposition (Title III extends to websites)."
+    severity: none

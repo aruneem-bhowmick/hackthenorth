@@ -18,6 +18,11 @@ COPY apps/investigator ./apps/investigator
 COPY packages/pipeline ./packages/pipeline
 COPY packages/verdicts ./packages/verdicts
 COPY config ./config
+# P4 evaluation image inputs are limited to code, hand labels, and aggregate
+# results. Do not copy demo briefs, source PDFs, upload storage, or secrets.
+COPY eval/__init__.py eval/runner.py ./eval/
+COPY eval/labels ./eval/labels
+COPY eval/results ./eval/results
 RUN uv sync --no-dev --package pincite-api --package pincite-worker --package pincite-investigator
 
 COPY apps/backend/start.sh /usr/local/bin/pincite-start

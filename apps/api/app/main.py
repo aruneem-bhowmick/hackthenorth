@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.routes import health, jobs, sources
+from app.routes import eval as evaluation, exports, health, jobs, sources
 
 settings = get_settings()
 
@@ -22,6 +22,8 @@ if settings.sentry_dsn_api:
         dsn=settings.sentry_dsn_api,
         environment=settings.sentry_environment,
         traces_sample_rate=1.0,
+        profiles_sample_rate=1.0,
+        enable_logs=True,
         send_default_pii=False,
     )
 
@@ -36,4 +38,6 @@ app.add_middleware(
 
 app.include_router(jobs.router)
 app.include_router(sources.router)
+app.include_router(exports.router)
+app.include_router(evaluation.router)
 app.include_router(health.router)

@@ -63,6 +63,16 @@ class FindingResponse(BaseModel):
     created_at: datetime
 
 
+class SignalResponse(BaseModel):
+    """A labelled, supplementary score; raw provider output remains server-side."""
+
+    provider: str
+    kind: str
+    score: float
+    created_at: datetime
+    section_ref: str | None = None
+
+
 class CitationResponse(BaseModel):
     id: uuid.UUID
     raw_text: str
@@ -80,11 +90,13 @@ class CitationResponse(BaseModel):
     source_state: str | None
     claims: list[ClaimResponse] = Field(default_factory=list)
     findings: list[FindingResponse] = Field(default_factory=list)
+    signals: list[SignalResponse] = Field(default_factory=list)
 
 
 class CitationsResponse(BaseModel):
     job_id: uuid.UUID
     citations: list[CitationResponse] = Field(default_factory=list)
+    page_signals: list[SignalResponse] = Field(default_factory=list)
 
 
 class SourceParagraphResponse(BaseModel):

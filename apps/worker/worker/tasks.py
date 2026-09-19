@@ -19,6 +19,7 @@ from typing import Any
 
 import httpx
 import sentry_sdk
+from sentry_sdk import logger as sentry_logger
 import yaml
 from investigator.agent import (
     CitationContext as InvestigatorCitationContext,
@@ -65,6 +66,11 @@ from worker.courtlistener import (
     CourtListenerUnavailable,
 )
 from worker.embeddings import EmbeddingUnavailable, cosine_scores, embed_texts
+from worker.gptzero import (
+    GPTZeroScore,
+    score_ai_likelihood_result,
+    score_hallucination_result,
+)
 from worker.elastic import (
     ElasticUnavailable,
     create_elasticsearch_client,
@@ -99,6 +105,7 @@ from worker.db import (
     Source,
     SourceAcquisition,
     SourceParagraph,
+    Signal,
     get_sessionmaker,
 )
 from worker.rate_limit import (
@@ -191,6 +198,10 @@ async def startup(ctx: dict[str, Any]) -> None:
         timeout=httpx.Timeout(connect=3.0, read=8.0, write=8.0, pool=3.0),
         limits=httpx.Limits(max_connections=8, max_keepalive_connections=8),
     )
+    ctx["gptzero_http"] = httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=3.0, read=8.0, write=8.0, pool=3.0),
+        limits=httpx.Limits(max_connections=4, max_keepalive_connections=4),
+    )
     ctx["embedding_semaphore"] = asyncio.Semaphore(8)
     settings = get_settings()
     elastic = create_elasticsearch_client(
@@ -214,6 +225,9 @@ async def shutdown(ctx: dict[str, Any]) -> None:
     if client is not None:
         await client.aclose()
     client = ctx.get("openai_http")
+    if client is not None:
+        await client.aclose()
+    client = ctx.get("gptzero_http")
     if client is not None:
         await client.aclose()
     client = ctx.get("elastic")
@@ -298,6 +312,14 @@ async def _ingest_and_enqueue(ctx: dict[str, Any], job_id: str) -> None:
                         for citation in persisted
                     ],
                 },
+            )
+            # FR-SIG-002: run page scoring outside ingestion and the review
+            # lifecycle. A slow/unavailable provider cannot postpone the
+            # first citation update or terminal verdicts.
+            await ctx["redis"].enqueue_job(
+                "process_page_signals",
+                job_id,
+                _job_id=f"page-signals:{job_id}",
             )
             if not persisted:
                 await _complete_job(session, job)
@@ -409,7 +431,27 @@ async def _prime_proposition_extraction(
         )
         for record, item in zip(persisted, extracted, strict=True)
     ]
-    propositions = await extract_propositions(settings.openai_api_key, excerpts, client)
+    # Raw httpx calls are not covered by Sentry's OpenAI auto-integration.
+    # Keep token/model telemetry at the provider boundary without recording
+    # proposition or brief text (NFR-OBS-003 / NFR-PRIV-002).
+    with sentry_sdk.start_span(
+        op="ai.generate_text", name="openai.proposition_extraction"
+    ) as span:
+        span.set_tag("gen_ai.system", "openai")
+        span.set_tag("gen_ai.operation.name", "proposition_extraction")
+
+        def capture_usage(
+            model: str, prompt_tokens: int | None, completion_tokens: int | None
+        ) -> None:
+            span.set_tag("gen_ai.request.model", model)
+            if prompt_tokens is not None:
+                span.set_data("gen_ai.usage.input_tokens", prompt_tokens)
+            if completion_tokens is not None:
+                span.set_data("gen_ai.usage.output_tokens", completion_tokens)
+
+        propositions = await extract_propositions(
+            settings.openai_api_key, excerpts, client, on_usage=capture_usage
+        )
     for record, item in zip(persisted, extracted, strict=True):
         proposition = propositions.get(str(record.id))
         if proposition is None:
@@ -602,6 +644,74 @@ async def _persist_brief_pages(session: Any, job_id: uuid.UUID, document: Any) -
     await session.flush()
 
 
+async def process_page_signals(ctx: dict[str, Any], job_id: str) -> None:
+    """Score persisted brief pages in an independent, non-lifecycle task."""
+
+    await _score_brief_page_signals_best_effort(ctx, uuid.UUID(job_id))
+
+
+async def _score_brief_page_signals_best_effort(
+    ctx: dict[str, Any], job_id: uuid.UUID
+) -> None:
+    """Store P4 page-level AI-writing signals without touching findings.
+
+    A small concurrency limit keeps a large brief from creating an upstream
+    burst.  The provider client itself converts every unavailable or malformed
+    result to ``None``; this outer guard preserves the same non-blocking
+    contract if persistence or a future adapter ever misbehaves.
+    """
+
+    api_key = get_settings().gptzero_api_key
+    if not api_key:
+        return
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        pages = list(
+            await session.scalars(
+                select(BriefPage)
+                .where(BriefPage.job_id == job_id)
+                .order_by(BriefPage.page)
+            )
+        )
+    semaphore = asyncio.Semaphore(4)
+
+    async def score_page(page: BriefPage) -> tuple[BriefPage, GPTZeroScore | None]:
+        async with semaphore:
+            return (
+                page,
+                await score_ai_likelihood_result(
+                    api_key, page.text, client=ctx.get("gptzero_http")
+                ),
+            )
+
+    try:
+        scored_pages = await asyncio.gather(
+            *(score_page(page) for page in pages)
+        )
+        async with sessionmaker() as session:
+            for page, scored in scored_pages:
+                if scored is None:
+                    continue
+                await _write_signal(
+                    session,
+                    job_id=job_id,
+                    citation_id=None,
+                    section_ref=f"page:{page.page}",
+                    provider="gptzero",
+                    kind="ai_likelihood",
+                    score=scored.score,
+                    raw=scored.raw,
+                )
+            await session.commit()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # Signals must never delay a usable P1--P3 review outcome or make its
+        # job fail. The exception is observable, while its provider payload
+        # and brief text stay out of Sentry tags/messages.
+        sentry_sdk.capture_exception()
+
+
 async def process_citation(ctx: dict[str, Any], citation_id: str) -> None:
     """Persist an existence result before any opinion download begins."""
 
@@ -748,6 +858,13 @@ async def _resolve_citation(session: Any, citation: Citation) -> ResolutionResul
         await session.flush()
 
     status = int(lookup_payload["status"])
+    sentry_logger.info(
+        "CourtListener citation resolution completed",
+        attributes={
+            "pincite.courtlistener.status": status,
+            "pincite.citation_id": str(citation.id),
+        },
+    )
     if status == 200:
         citation.resolution_state = "resolved"
         await _write_finding(
@@ -1361,6 +1478,10 @@ async def process_investigation(ctx: dict[str, Any], citation_id: str) -> None:
                     outcome = await run_investigation(
                         settings.browserbase_api_key, context, budget, **kwargs
                     )
+            if outcome is not None:
+                span.set_data("investigator.searches", outcome.searches)
+                span.set_data("investigator.fetches", outcome.fetches)
+                span.set_tag("investigator.verdict", outcome.verdict.value)
     except InvestigatorUnavailable as error:
         unavailable_reason = str(error)
     except asyncio.CancelledError:
@@ -1667,12 +1788,16 @@ async def process_proposition(ctx: dict[str, Any], citation_id: str) -> None:
 
     sessionmaker = get_sessionmaker()
     work: tuple[Citation, Source, str] | None = None
+    proposition_for_signal: str | None = None
     async with sessionmaker() as session:
         citation = await session.get(Citation, uuid.UUID(citation_id))
         if citation is None:
             return
         claim = await session.scalar(
             select(Claim).where(Claim.citation_id == citation.id)
+        )
+        proposition_for_signal = (
+            claim.proposition_text if claim is not None and claim.proposition_text else None
         )
         acquisition = (
             await session.get(SourceAcquisition, citation.source_acquisition_id)
@@ -1704,6 +1829,10 @@ async def process_proposition(ctx: dict[str, Any], citation_id: str) -> None:
         await _maybe_finish_job(session, citation.job_id)
 
     if work is None:
+        if proposition_for_signal is not None:
+            await _score_proposition_signal_best_effort(
+                ctx, citation.job_id, citation.id, proposition_for_signal
+            )
         return
     citation, source, proposition = work
     result = None
@@ -1738,15 +1867,34 @@ async def process_proposition(ctx: dict[str, Any], citation_id: str) -> None:
             with sentry_sdk.start_span(
                 op="ai.generate_text", name="openai.proposition_judge"
             ) as span:
-                span.set_tag("ai.provider", "openai")
-                span.set_tag("ai.model", "gpt-4o-mini")
+                span.set_tag("gen_ai.system", "openai")
+                span.set_tag("gen_ai.operation.name", "proposition_judge")
+
+                def capture_usage(
+                    model: str, prompt_tokens: int | None, completion_tokens: int | None
+                ) -> None:
+                    span.set_tag("gen_ai.request.model", model)
+                    if prompt_tokens is not None:
+                        span.set_data("gen_ai.usage.input_tokens", prompt_tokens)
+                    if completion_tokens is not None:
+                        span.set_data("gen_ai.usage.output_tokens", completion_tokens)
+
                 raw = await call_judge(
                     get_settings().openai_api_key,
                     proposition,
                     judge_paragraphs,
                     ctx.get("openai_http"),
+                    on_usage=capture_usage,
                 )
             result = evaluate_proposition(raw, judge_paragraphs)
+            if result.verdict is PropositionVerdict.UNVERIFIABLE:
+                sentry_logger.warning(
+                    "Proposition judge response did not pass deterministic validation",
+                    attributes={
+                        "pincite.citation_id": citation_id,
+                        "pincite.validation_reason": result.reason or "UNVERIFIABLE",
+                    },
+                )
     except (ElasticUnavailable, EmbeddingUnavailable, JudgeUnavailable):
         unavailable_reason = "UPSTREAM_UNAVAILABLE"
     except asyncio.CancelledError:
@@ -1794,6 +1942,51 @@ async def process_proposition(ctx: dict[str, Any], citation_id: str) -> None:
         await session.commit()
         await _publish_citation_findings(session, persisted, ctx.get("elastic"))
         await _maybe_finish_job(session, persisted.job_id)
+
+    # This follows the completed finding transaction. It has no reference to
+    # the validated judge result or the finding writer, so it cannot change a
+    # verdict, confidence, notes, or terminal job state (CON-SIG-001 / INV-2).
+    if proposition:
+        await _score_proposition_signal_best_effort(
+            ctx, citation.job_id, citation.id, proposition
+        )
+
+
+async def _score_proposition_signal_best_effort(
+    ctx: dict[str, Any],
+    job_id: uuid.UUID,
+    citation_id: uuid.UUID,
+    proposition: str,
+) -> None:
+    """Persist one post-verdict hallucination signal if GPTZero supports it."""
+
+    api_key = get_settings().gptzero_api_key
+    if not api_key:
+        return
+    try:
+        scored = await score_hallucination_result(
+            api_key, proposition, client=ctx.get("gptzero_http")
+        )
+        if scored is None:
+            return
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            await _write_signal(
+                session,
+                job_id=job_id,
+                citation_id=citation_id,
+                section_ref=None,
+                provider="gptzero",
+                kind="hallucination",
+                score=scored.score,
+                raw=scored.raw,
+            )
+            await session.commit()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # A signal outage is deliberately not an upstream verdict outage.
+        sentry_sdk.capture_exception()
 
 
 async def _embed_proposition(ctx: dict[str, Any], text: str) -> list[float] | None:
@@ -1856,6 +2049,19 @@ async def _quote_check(
             claim.quote_text,
             verdict_paragraphs,
             pinpoint_page=_pinpoint_page(citation.pinpoint),
+        )
+        sentry_logger.info(
+            "Deterministic quote alignment completed",
+            attributes={
+                "pincite.quote.verdict": result.verdict.value,
+                "pincite.quote.similarity": result.similarity,
+                "pincite.quote.confidence": result.confidence,
+                **(
+                    {"pincite.citation_id": str(citation.id)}
+                    if getattr(citation, "id", None) is not None
+                    else {}
+                ),
+            },
         )
         # Embeddings are an optional refinement, never a P1 completion
         # dependency. The terminal deterministic finding remains honest about
@@ -2060,6 +2266,50 @@ async def _write_finding(
             evidence,
         )
         existing.rationale = rationale
+    await session.flush()
+    return existing
+
+
+async def _write_signal(
+    session: Any,
+    *,
+    job_id: uuid.UUID,
+    citation_id: uuid.UUID | None,
+    section_ref: str | None,
+    provider: str,
+    kind: str,
+    score: float,
+    raw: dict[str, Any],
+) -> Signal:
+    """Idempotently retain one provider score outside the Finding table."""
+
+    if (citation_id is None) == (section_ref is None):
+        raise ValueError("a signal must identify exactly one citation or section")
+    criteria = [
+        Signal.job_id == job_id,
+        Signal.provider == provider,
+        Signal.kind == kind,
+    ]
+    if citation_id is not None:
+        criteria.append(Signal.citation_id == citation_id)
+    else:
+        criteria.append(Signal.section_ref == section_ref)
+    existing = await session.scalar(select(Signal).where(*criteria))
+    if existing is None:
+        existing = Signal(
+            job_id=job_id,
+            citation_id=citation_id,
+            section_ref=section_ref,
+            provider=provider,
+            kind=kind,
+            score=score,
+            raw=raw,
+        )
+        session.add(existing)
+    else:
+        existing.score = score
+        existing.raw = raw
+        existing.created_at = datetime.now(timezone.utc)
     await session.flush()
     return existing
 

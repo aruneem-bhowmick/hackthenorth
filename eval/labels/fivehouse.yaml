@@ -1,0 +1,106 @@
+# Labelled answer key for the Fivehouse flagship demo brief (P4 pilot eval set).
+#
+# Ground truth sourced and cross-verified 2026-09-19:
+#   - D.E. 89 (plaintiff's reply, pp. 3-5) identifies the specific misrepresentations.
+#   - D.E. 98 (magistrate judge's order, 2026-01-08) confirms the claim and orders
+#     a surreply: "Plaintiff ... claimed that [AUSA] Renfer misrepresented the
+#     holdings from several cases and included fabricated quotations."
+#   - Every case-existence claim below was independently re-verified against
+#     CourtListener's citation-lookup API this session (not assumed from the
+#     court filings alone).
+#
+# All three flagged citations are REAL cases (existence: VERIFIED). This fixture
+# exercises quote-fidelity / proposition-support failure modes specifically,
+# not the existence check — useful precisely because it's the failure mode a
+# naive "does this case exist" checker would miss entirely.
+
+brief: fivehouse
+docket: "2:25-cv-00041-M-RN (E.D.N.C.)"
+document: "D.E. 86 -- Defendants' Response in Opposition to Motion to Supplement the Administrative Record"
+filed: "2025-12-23"
+source_url: "https://www.courtlistener.com/docket/71231282/86/fivehouse-v-us-department-of-defense/"
+ground_truth_sources:
+  - document: "D.E. 89 -- Plaintiff's Reply (pp. 3-5)"
+    url: "https://www.courtlistener.com/recap/gov.uscourts.nced.221403/gov.uscourts.nced.221403.89.0.pdf"
+  - document: "D.E. 98 -- Magistrate Judge Robert T. Numbers, II Order (2026-01-08)"
+    url: "https://www.courtlistener.com/recap/gov.uscourts.nced.221403/gov.uscourts.nced.221403.98.0.pdf"
+
+citations:
+  - citation: "556 F.3d 177"
+    case_name: "Ohio Valley Envtl. Coal. v. Aracoma Coal Co."
+    appears_in_brief_at:
+      - "p.2 (full cite, pin 201)"
+      - "p.3 (\"Ohio Valley, 556 F.3d at 201\")"
+      - "p.4 (\"In Ohio Valley, the court rejected...\", 556 F.3d at 201)"
+      - "p.5 (\"Ohio Valley, 556 F.3d at 201\")"
+    expected:
+      existence: VERIFIED
+      quote_or_proposition: MISREPRESENTED
+    issue: >
+      Brief attributes the holding "is limited to the administrative record that
+      was before the agency at the time of its decision," the parenthetical
+      "(rejecting efforts to rely on extra-record materials where plaintiffs
+      failed to overcome the presumption that the record was complete)," and
+      the quoted phrase "[m]ere allegations ... do not rebut the presumption of
+      completeness" to this case. D.E. 89 at 3-4: "these quoted phrases appear
+      nowhere in the Fourth Circuit's decision." What Ohio Valley actually holds
+      (per D.E. 89) supports the opposite reading -- it "acknowledge[s] the
+      importance of extra-record evidence in NEPA cases."
+    severity: high
+
+  - citation: "637 F.3d 259"
+    case_name: "Dow AgroSciences LLC v. National Marine Fisheries Service"
+    appears_in_brief_at:
+      - "p.4 (\"Dow AgroSciences, 637 F.3d at 268-69\")"
+      - "p.5 (\"Dow AgroSciences, 637 F.3d at 269\")"
+      - "p.6 (direct quote, 637 F.3d at 268)"
+    expected:
+      existence: VERIFIED
+      quote_or_proposition: MISREPRESENTED
+    issue: >
+      Brief attributes the direct quotation "The APA does not provide for a
+      broad right of discovery" to this case, and characterizes it as
+      "[r]ejecting supplementation where the issues were legal and
+      policy-based, not technical." D.E. 89 at 4: "The quoted language does not
+      appear in the case, and Defendants' characterization of the case is
+      inaccurate. Dow AgroSciences addresses an entirely different issue"
+      (biological-opinion reviewability, not AR supplementation).
+    extraction_note: >
+      This case's full name never appears anywhere in the brief -- it is
+      introduced directly in short form ("Dow AgroSciences, 637 F.3d at
+      268-69") with no preceding full citation. A real short-form/antecedent
+      extraction edge case worth exercising (FR-EXT-002), independent of the
+      misrepresentation issue.
+    severity: high
+
+  - citation: "899 F.3d 260"
+    case_name: "Sierra Club v. United States Department of the Interior"
+    appears_in_brief_at:
+      - "p.4 (full cite, pin 295-96)"
+    expected:
+      existence: VERIFIED
+      quote_or_proposition: MISREPRESENTED
+    issue: >
+      Brief attributes the holding "[e]xtra-record evidence is not permitted
+      merely because plaintiffs believe additional materials would be helpful"
+      to this case. D.E. 89 at 4-5: "This proposition does not exist at the
+      cited pages -- or anywhere in the opinion." The cited pages address
+      whether the Natural Gas Act's judicial review provision precluded
+      vacatur of the challenged agency action, not AR supplementation.
+    severity: high
+
+  - citation: "411 U.S. 138"
+    case_name: "Camp v. Pitts"
+    expected:
+      existence: VERIFIED
+      quote_or_proposition: ACCURATE
+    issue: "Negative control -- cited and quoted accurately; D.E. 89 relies on the same case itself and does not dispute this citation."
+    severity: none
+
+  - citation: "401 U.S. 402"
+    case_name: "Citizens to Preserve Overton Park, Inc. v. Volpe"
+    expected:
+      existence: VERIFIED
+      quote_or_proposition: ACCURATE
+    issue: "Negative control -- cited accurately in both D.E. 86 and D.E. 89."
+    severity: none

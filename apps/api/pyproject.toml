@@ -16,6 +16,8 @@ dependencies = [
     "httpx>=0.27",
     "elasticsearch>=8.15",
     "truststore>=0.9",
+    "fpdf2>=2.8",
+    "pyyaml>=6.0",
 ]
 
 [build-system]

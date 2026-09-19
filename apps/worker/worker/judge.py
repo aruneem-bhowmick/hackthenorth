@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import httpx
@@ -11,6 +11,7 @@ import httpx
 from verdicts.proposition import JudgeParagraph
 
 MODEL = "gpt-4o-mini"
+UsageCallback = Callable[[str, int | None, int | None], None]
 
 
 class JudgeUnavailable(RuntimeError):
@@ -54,6 +55,7 @@ async def call_judge(
     proposition: str,
     paragraphs: Sequence[JudgeParagraph],
     client: httpx.AsyncClient | None = None,
+    on_usage: UsageCallback | None = None,
 ) -> dict[str, Any]:
     """Return only schema-shaped JSON; semantic validation happens in verdicts."""
 
@@ -85,6 +87,14 @@ async def call_judge(
     if response.status_code != 200:
         raise JudgeUnavailable(f"OpenAI proposition judge returned HTTP {response.status_code}")
     try:
-        return json.loads(response.json()["choices"][0]["message"]["content"])
+        payload = response.json()
+        usage = payload.get("usage", {})
+        if on_usage is not None:
+            on_usage(
+                payload.get("model") if isinstance(payload.get("model"), str) else MODEL,
+                usage.get("prompt_tokens") if isinstance(usage, dict) and isinstance(usage.get("prompt_tokens"), int) else None,
+                usage.get("completion_tokens") if isinstance(usage, dict) and isinstance(usage.get("completion_tokens"), int) else None,
+            )
+        return json.loads(payload["choices"][0]["message"]["content"])
     except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise JudgeUnavailable("OpenAI proposition judge returned invalid structured output") from exc

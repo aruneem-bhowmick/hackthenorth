@@ -1,0 +1,49 @@
+{
+  "dataset": {
+    "briefs": 2,
+    "description": "Pilot-scale labelled set based on public briefs and court orders. It is not the full SPEC.md §12 target set, and results describe only the referenced persisted jobs; no pipeline work is rerun while evaluating.",
+    "labelled_citations": 14
+  },
+  "metric_definition": {
+    "abstentions": "UNVERIFIABLE, missing, or non-terminal findings are reported separately",
+    "existence": "positive means an expected non-verified existence outcome",
+    "proposition": "positive means an expected proposition-support discrepancy",
+    "quote": "positive means an expected quotation discrepancy"
+  },
+  "metrics": {
+    "existence": {
+      "abstentions": 3,
+      "exact_matches": 10,
+      "false_negatives": 2,
+      "false_positives": 1,
+      "labelled": 14,
+      "precision": 0.5,
+      "recall": 0.3333333333333333,
+      "scored": 11,
+      "true_negatives": 9,
+      "true_positives": 1
+    },
+    "proposition": {
+      "abstentions": 9,
+      "false_negatives": 6,
+      "false_positives": 0,
+      "labelled": 12,
+      "precision": null,
+      "recall": 0.0,
+      "scored": 3,
+      "true_negatives": 3,
+      "true_positives": 0
+    },
+    "quote": {
+      "abstentions": 10,
+      "false_negatives": 6,
+      "false_positives": 1,
+      "labelled": 12,
+      "precision": 0.0,
+      "recall": 0.0,
+      "scored": 2,
+      "true_negatives": 1,
+      "true_positives": 0
+    }
+  }
+}

@@ -58,6 +58,15 @@ def _metadata(value: object) -> dict[str, str | int | None]:
     for name in ("plaintiff", "defendant", "court", "year", "antecedent_guess", "pin_cite"):
         data = getattr(meta, name, None)
         result[name] = data
+    # ``eyecite`` parses the reporter components reliably even where its
+    # contextual case-name span has been clipped by an abbreviation or a PDF
+    # line break.  Keep those parser facts for the antecedent resolver below;
+    # they are not user-facing case-name guesses.
+    groups = getattr(value, "groups", {})
+    if isinstance(groups, dict):
+        for name in ("volume", "reporter", "page"):
+            data = groups.get(name)
+            result[name] = data if isinstance(data, (str, int)) else None
     return result
 
 
@@ -212,6 +221,25 @@ def _matches_antecedent(candidate: Citation, guess: str | None) -> bool:
     return needle in (candidate.case_name or "").casefold() or needle in candidate.raw_text.casefold()
 
 
+def _reporter_key(citation: Citation) -> tuple[str, str] | None:
+    """Return eyecite's volume/reporter identity without treating a pin cite as one.
+
+    A short form's page is normally a pinpoint, not the first page of its
+    authority, so it cannot safely participate in this identity.  The pair is
+    only a fallback after a conventional case-name match fails.
+    """
+
+    volume = citation.metadata.get("volume")
+    reporter = citation.metadata.get("reporter")
+    if not isinstance(volume, (str, int)) or not isinstance(reporter, str):
+        return None
+    normalized_volume = str(volume).strip()
+    normalized_reporter = " ".join(reporter.casefold().split())
+    if not normalized_volume or not normalized_reporter:
+        return None
+    return normalized_volume, normalized_reporter
+
+
 def _resolve_antecedents(citations: Sequence[Citation]) -> list[Citation]:
     resolved: list[Citation] = []
     full: list[Citation] = []
@@ -235,6 +263,19 @@ def _resolve_antecedents(citations: Sequence[Citation]) -> list[Citation]:
             guess = citation.metadata.get("antecedent_guess")
             guess_text = str(guess) if guess else None
             antecedent = next((item for item in reversed(full) if _matches_antecedent(item, guess_text)), None)
+            if antecedent is None:
+                # PDF extraction can leave a full citation's party name
+                # truncated (for example, ``Coal. v. Aracoma``) while a later
+                # short form retains ``Ohio Valley``.  In that case, link only
+                # when the parsed volume/reporter pair identifies exactly one
+                # earlier full citation.  Multiple matching reporters remain
+                # unresolved rather than selecting a potentially wrong case.
+                reporter_key = _reporter_key(citation)
+                reporter_matches = [
+                    item for item in full if reporter_key is not None and _reporter_key(item) == reporter_key
+                ]
+                if len(reporter_matches) == 1:
+                    antecedent = reporter_matches[0]
             if antecedent is None:
                 updated = replace(citation, antecedent_state=AntecedentState.UNRESOLVED)
             else:

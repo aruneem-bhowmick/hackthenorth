@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import Settings, get_settings
-from app.db import BriefPage, Citation, Finding, Job, JobMode, JobStatus, default_expiry, get_session
+from app.db import BriefPage, Citation, Finding, Job, JobMode, JobStatus, Signal, default_expiry, get_session
 from app.queue import get_arq_pool
 from app.schemas import (
     CitationResponse,
@@ -26,6 +26,7 @@ from app.schemas import (
     JobStatusResponse,
     BriefPageResponse,
     BriefPagesResponse,
+    SignalResponse,
 )
 from app.sse import subscribe_events
 
@@ -128,14 +129,27 @@ async def get_job_citations(
         .options(
             selectinload(Citation.claims),
             selectinload(Citation.findings),
+            selectinload(Citation.signals),
             selectinload(Citation.source_acquisition),
         )
         .order_by(Citation.page.nulls_last(), Citation.start_offset.nulls_last(), Citation.id)
     )
     citations = result.scalars().unique().all()
+    page_signals = list(
+        await session.scalars(
+            select(Signal)
+            .where(
+                Signal.job_id == job_id,
+                Signal.citation_id.is_(None),
+                Signal.section_ref.is_not(None),
+            )
+            .order_by(Signal.section_ref, Signal.provider, Signal.kind, Signal.created_at)
+        )
+    )
     return CitationsResponse(
         job_id=job_id,
         citations=[_to_citation_response(citation) for citation in citations],
+        page_signals=[_to_signal_response(signal) for signal in page_signals],
     )
 
 
@@ -268,6 +282,23 @@ def _to_citation_response(citation: Citation) -> CitationResponse:
             )
             for finding in sorted(citation.findings, key=lambda item: (item.created_at, str(item.id)))
         ],
+        signals=[
+            _to_signal_response(signal)
+            for signal in sorted(
+                citation.signals,
+                key=lambda item: (item.provider, item.kind, item.created_at, str(item.id)),
+            )
+        ],
+    )
+
+
+def _to_signal_response(signal: Signal) -> SignalResponse:
+    return SignalResponse(
+        provider=signal.provider,
+        kind=signal.kind,
+        score=signal.score,
+        created_at=signal.created_at,
+        section_ref=signal.section_ref,
     )
 
 
