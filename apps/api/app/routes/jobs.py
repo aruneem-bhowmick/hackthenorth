@@ -9,6 +9,7 @@ import sentry_sdk
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -191,13 +192,22 @@ async def _to_status_response(job: Job, session: AsyncSession) -> JobStatusRespo
     # A verdict count is a deliberately compact status summary.  The detailed
     # evidence remains on /citations, avoiding duplicated document text in the
     # polling response.
-    result = await session.execute(
-        select(Finding.verdict, func.count(Finding.id))
-        .join(Citation, Finding.citation_id == Citation.id)
-        .where(Citation.job_id == job.id)
-        .group_by(Finding.verdict)
-    )
-    summary = {verdict: count for verdict, count in result.all()}
+    try:
+        result = await session.execute(
+            select(Finding.verdict, func.count(Finding.id))
+            .join(Citation, Finding.citation_id == Citation.id)
+            .where(Citation.job_id == job.id)
+            .group_by(Finding.verdict)
+        )
+    except ProgrammingError as exc:
+        # During a rolling P0 -> P1 deploy, an API instance can briefly see a
+        # database before Alembic has created the review tables.  The P0 job
+        # itself is still useful; return its status without a P1 summary.
+        if "relation \"findings\" does not exist" not in str(exc):
+            raise
+        summary = {}
+    else:
+        summary = {verdict: count for verdict, count in result.all()}
     return JobStatusResponse(
         job_id=job.id,
         status=job.status,
