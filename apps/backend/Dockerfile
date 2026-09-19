@@ -2,11 +2,6 @@
 # uploaded brief remains available after the API has enqueued its review job.
 FROM python:3.12-slim
 
-# Local development may supply an OS-trusted TLS-inspection certificate. The
-# glob is empty in Railway, where this remains a no-op.
-RUN --mount=type=bind,source=certs,target=/tmp/certs,ro \
-    sh -c 'for f in /tmp/certs/*.crt; do [ -f "$f" ] && cp "$f" /usr/local/share/ca-certificates/; done; update-ca-certificates'
-
 ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt \
     UV_SYSTEM_CERTS=1 \
     UV_PROJECT_ENVIRONMENT=/opt/venv \
