@@ -27,10 +27,14 @@ async def process_job(
     if sentry_baggage:
         headers["baggage"] = sentry_baggage
 
-    with sentry_sdk.continue_trace(headers):
-        with sentry_sdk.start_transaction(op="queue.task", name="process_job") as txn:
-            txn.set_tag("job_id", job_id)
-            await _process_job(job_id)
+    # continue_trace() returns a Transaction pre-configured with the trace_id
+    # / parent_span_id parsed from `headers` — it is not a context manager
+    # to wrap a separate start_transaction() call (that starts a second,
+    # disconnected transaction with its own fresh trace_id instead).
+    transaction = sentry_sdk.continue_trace(headers, op="queue.task", name="process_job")
+    with sentry_sdk.start_transaction(transaction) as txn:
+        txn.set_tag("job_id", job_id)
+        await _process_job(job_id)
 
 
 async def _process_job(job_id: str) -> None:
