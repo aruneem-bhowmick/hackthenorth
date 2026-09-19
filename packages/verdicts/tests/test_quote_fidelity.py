@@ -93,6 +93,29 @@ def test_invented_quote_returns_closest_actual_language_and_semantic_status():
     assert "SEMANTIC_PROVIDER_REQUIRED" in checked.notes
 
 
+def test_embedding_score_can_identify_a_paraphrase_without_an_llm_judge():
+    checked = check_quote(
+        "Courts must interpret statutes according to the words Congress enacted.",
+        [SourceParagraph("one", "Courts must apply the statute according to its text.")],
+        semantic_scores={"one": 0.91},
+    )
+
+    assert checked.verdict is QuoteVerdict.PARAPHRASE_IN_QUOTES
+    assert checked.semantic_check_status is SemanticCheckStatus.COMPLETED
+
+
+def test_completed_embedding_check_records_a_non_match():
+    checked = check_quote(
+        "Courts always ignore every statute.",
+        [SourceParagraph("one", "Courts must apply the statute according to its text.")],
+        semantic_scores={"one": 0.20},
+    )
+
+    assert checked.verdict is QuoteVerdict.NOT_FOUND_IN_SOURCE
+    assert checked.semantic_check_status is SemanticCheckStatus.COMPLETED
+    assert "SEMANTIC_NO_MATCH" in checked.notes
+
+
 def test_real_quote_in_dissent_retains_part_evidence_and_pinpoint_note():
     checked = result(
         "The statute does not authorize this result.",

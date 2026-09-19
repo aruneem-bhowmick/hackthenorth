@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import re
 import uuid
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -27,6 +28,7 @@ from verdicts import check_quote
 
 from worker.config import get_settings
 from worker.courtlistener import CourtListenerClient, CourtListenerUnavailable
+from worker.embeddings import EmbeddingUnavailable, cosine_scores
 from worker.db import Claim, Citation, Finding, Job, JobStatus, LookupCache, Source, SourceParagraph, get_sessionmaker
 from worker.rate_limit import CourtListenerRateLimiter
 from worker.sse import get_redis, publish_event
@@ -363,6 +365,21 @@ async def _quote_check(
             ],
             pinpoint_page=_pinpoint_page(citation.pinpoint),
         )
+        # ADR-002 permits embeddings (not an LLM judge) for the one semantic
+        # question left after deterministic alignment. Bound P1 consumption to
+        # 32 source paragraphs per quote.
+        if result.semantic_check_status.value == "NOT_CONFIGURED" and get_settings().openai_api_key:
+            candidates = _semantic_candidates(claim.quote_text, paragraphs)
+            try:
+                scores = await cosine_scores(get_settings().openai_api_key, claim.quote_text, candidates)
+                result = check_quote(
+                    claim.quote_text,
+                    [VerdictParagraph(str(item.id), item.text, item.page, item.opinion_part) for item in paragraphs],
+                    pinpoint_page=_pinpoint_page(citation.pinpoint),
+                    semantic_scores=scores,
+                )
+            except EmbeddingUnavailable:
+                pass
         evidence: dict[str, Any] = {"source_id": str(source.id), "diff": [
             {"op": item.operation, "quote_tokens": list(item.quote_tokens), "source_tokens": list(item.source_tokens)}
             for item in result.diff
@@ -383,6 +400,17 @@ async def _quote_check(
             [*result.notes, f"SEMANTIC_CHECK_{result.semantic_check_status.value}"],
             evidence,
         )
+
+
+def _semantic_candidates(quote: str, paragraphs: list[SourceParagraph]) -> list[tuple[str, str]]:
+    """Bound request cost while preferring paragraphs with lexical signal."""
+    terms = set(re.findall(r"[a-z0-9]+", quote.casefold()))
+    ranked = sorted(
+        paragraphs,
+        key=lambda item: len(terms & set(re.findall(r"[a-z0-9]+", item.text.casefold()))),
+        reverse=True,
+    )
+    return [(str(item.id), item.text) for item in ranked[:32]]
 
 
 async def _write_quote_unavailable(session: Any, citation: Citation) -> None:

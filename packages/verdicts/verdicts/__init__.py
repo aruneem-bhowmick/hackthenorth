@@ -14,7 +14,7 @@ from pathlib import Path
 import difflib
 import re
 import unicodedata
-from typing import Iterable, Literal
+from typing import Iterable, Literal, Mapping
 
 import yaml
 
@@ -33,13 +33,13 @@ class QuoteVerdict(StrEnum):
 class SemanticCheckStatus(StrEnum):
     """Whether the semantic prerequisite for PARAPHRASE was checked.
 
-    P1 has no approved embedding provider.  ``NOT_CONFIGURED`` is intentionally
-    exposed so callers never mistake a lexical-only NOT_FOUND result for a
-    completed semantic-paraphrase determination.
+    ``NOT_CONFIGURED`` is intentionally exposed so callers never mistake a
+    lexical-only NOT_FOUND result for a completed semantic determination.
     """
 
     NOT_NEEDED = "NOT_NEEDED"
     NOT_CONFIGURED = "NOT_CONFIGURED"
+    COMPLETED = "COMPLETED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,14 +172,15 @@ def check_quote(
     *,
     pinpoint_page: int | None = None,
     thresholds: QuoteThresholds | None = None,
+    semantic_scores: Mapping[str, float] | None = None,
 ) -> QuoteCheckResult:
     """Compare a brief quotation with supplied opinion paragraphs.
 
     The returned closest passage is always local to the supplied resolved
     opinion, satisfying P1's ADR-010 fallback.  A result below the lexical
     threshold includes ``NOT_CONFIGURED`` because P1 cannot make the semantic
-    determination required for ``PARAPHRASE_IN_QUOTES`` without a separately
-    approved embedding provider.
+    determination required for ``PARAPHRASE_IN_QUOTES`` without supplied
+    embedding scores.
     """
 
     threshold_values = thresholds or load_thresholds()
@@ -266,9 +267,29 @@ def check_quote(
         paragraph, candidate, tokens = closest
         closest_evidence = _evidence(paragraph, tokens, candidate.start, candidate.end)
 
-    # Do not call this a semantic result: ADR-002 says paraphrase detection is
-    # embedding-based, while P1 deliberately has no approved provider.  The
-    # lexical result remains useful, but consumers must surface this status.
+    if semantic_scores:
+        semantic_match = max(
+            (paragraph for paragraph in source_paragraphs if paragraph.id in semantic_scores),
+            key=lambda paragraph: semantic_scores[paragraph.id],
+            default=None,
+        )
+        if (
+            semantic_match is not None
+            and semantic_scores[semantic_match.id] >= threshold_values.paraphrase_semantic_similarity
+        ):
+            semantic_evidence = _whole_paragraph_evidence(semantic_match)
+            return QuoteCheckResult(
+                verdict=QuoteVerdict.PARAPHRASE_IN_QUOTES,
+                similarity=round(semantic_scores[semantic_match.id], 4),
+                confidence=round(semantic_scores[semantic_match.id], 4),
+                evidence=semantic_evidence,
+                closest_passage=semantic_evidence,
+                diff=_word_diff(_display_tokens(segments), _values(_tokens(semantic_match.text))),
+                notes=("SEMANTIC_MATCH",),
+                semantic_check_status=SemanticCheckStatus.COMPLETED,
+            )
+
+    semantic_completed = semantic_scores is not None
     return QuoteCheckResult(
         verdict=QuoteVerdict.NOT_FOUND_IN_SOURCE,
         similarity=round(max(closest_score, 0.0), 4),
@@ -276,8 +297,8 @@ def check_quote(
         evidence=None,
         closest_passage=closest_evidence,
         diff=_word_diff(_display_tokens(segments), _values(_tokens(closest_evidence.text)) if closest_evidence else []),
-        notes=("SEMANTIC_PROVIDER_REQUIRED",),
-        semantic_check_status=SemanticCheckStatus.NOT_CONFIGURED,
+        notes=("SEMANTIC_NO_MATCH",) if semantic_completed else ("SEMANTIC_PROVIDER_REQUIRED",),
+        semantic_check_status=(SemanticCheckStatus.COMPLETED if semantic_completed else SemanticCheckStatus.NOT_CONFIGURED),
     )
 
 
