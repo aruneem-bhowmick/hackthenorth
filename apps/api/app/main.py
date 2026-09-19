@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.routes import health, jobs
+from app.routes import health, jobs, sources
 
 settings = get_settings()
 
@@ -29,10 +29,11 @@ app = FastAPI(title="Pincite API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=settings.cors_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(jobs.router)
+app.include_router(sources.router)
 app.include_router(health.router)

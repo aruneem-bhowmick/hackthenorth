@@ -11,14 +11,18 @@ import httpx
 
 API_BASE = "http://localhost:8000"
 
-# Smallest structurally-valid PDF: catalog -> pages -> one empty page.
+# Small, valid text-layer PDF. P1 correctly rejects PDFs with no extractable
+# text (FR-ING-004), so the inherited P0 hello-job test must use a real text
+# layer rather than an empty page.
 _MINIMAL_PDF = (
     b"%PDF-1.4\n"
-    b"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
-    b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
-    b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>endobj\n"
-    b"trailer<</Root 1 0 R>>\n"
-    b"%%EOF"
+    b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+    b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+    b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n"
+    b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
+    b"5 0 obj\n<< /Length 48 >>\nstream\nBT /F1 12 Tf 72 720 Td (Pincite smoke test.) Tj ET\nendstream\nendobj\n"
+    b"xref\n0 6\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \n0000000241 00000 n \n0000000311 00000 n \n"
+    b"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n411\n%%EOF\n"
 )
 
 

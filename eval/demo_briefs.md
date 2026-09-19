@@ -55,6 +55,30 @@ Attorney's Office to appear at a show-cause hearing").
 - **Availability:** D.E. 25 and D.E. 27 confirmed `is_available: true`.
 - **Citation count:** not yet extracted.
 
+## 3. International Partners for Ethical Care v. Ferguson — P1 final smoke brief
+
+This is the repeatable **final P1 smoke-test input**, separate from the
+sanctions-case demo candidates above. It is a public, text-layer federal brief
+hosted by the Supreme Court itself; the PDF is intentionally not committed.
+
+- **Docket:** No. 25-840, Supreme Court of the United States.
+- **Document:** *Brief of Amicus Curiae Dr. Erica E. Anderson in Support of
+  Petitioners*, filed February 17, 2025, on a petition from the Ninth Circuit.
+- **Official source:**
+  `https://www.supremecourt.gov/DocketPDF/25/25-840/396422/20260217135200647_25-840%20Amicus%20Brief%20of%20Erica%20E.%20Anderson.pdf`
+- **Re-verified 2026-09-19:** 31 pages, 619,731 bytes, SHA-256
+  `bec2a6dfe04f4d342ee54d35793fbcc5c53b56ea9d5d39c64558e0bd2d675195`.
+- **Current P1 pipeline baseline:** 118 citation records (94 distinct
+  normalised strings), including 58 full citations, 29 short forms, 16 *id.*
+  citations, 15 *supra* citations, and 63 attached quotation claims.
+
+It exceeds the P1 exit gate by a wide margin and exercises the extraction
+resolver rather than only repeated full cites. Before a final run, re-download
+the official PDF, verify its SHA-256, and rerun extraction; a changed file or
+materially changed count invalidates this baseline. This file is for the
+deployment/P1-gate smoke test only—not a finding of misconduct and not the
+flagship sanctions-case demonstration.
+
 ## Dropped: Adams v. Matrix Providers Inc.
 
 No. 1:23-cv-01996, D. Colorado. Charlotin database lists a 2026-08-27
