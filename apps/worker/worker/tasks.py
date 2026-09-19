@@ -25,7 +25,8 @@ from pipeline import extract_citations, extract_pdf
 from pipeline.ingestion import IngestionError
 from pipeline.models import AntecedentState
 from verdicts import SourceParagraph as VerdictParagraph
-from verdicts import check_quote
+from verdicts import check_quote, normalise
+from verdicts.proposition import JudgeParagraph, PropositionVerdict, evaluate_proposition, load_proposition_thresholds
 
 from worker.config import get_settings
 from worker.courtlistener import (
@@ -35,7 +36,28 @@ from worker.courtlistener import (
     CourtListenerClient,
     CourtListenerUnavailable,
 )
-from worker.embeddings import EmbeddingUnavailable, cosine_scores
+from worker.embeddings import EmbeddingUnavailable, cosine_scores, embed_texts
+from worker.elastic import (
+    ElasticUnavailable,
+    create_elasticsearch_client,
+    ensure_indices,
+    index_finding,
+    index_source_paragraphs,
+    probe_rerank_inference_id,
+)
+from worker.judge import JudgeUnavailable, call_judge
+from worker.proposition_extraction import (
+    PropositionExcerpt,
+    PropositionExtractionUnavailable,
+    extract_propositions,
+)
+from worker.retrieval import (
+    RetrievedParagraph,
+    hosted_reranker,
+    retrieve_paragraphs,
+    retrieve_quote_candidates,
+)
+from worker.checks import CHECK_EXISTENCE, CHECK_PROPOSITION, CHECK_QUOTE
 from worker.db import (
     BriefPage,
     Claim,
@@ -94,6 +116,20 @@ class SourceMaterial:
     paragraphs: list[tuple[str, str | None]]
 
 
+def _opinion_part(opinion_type: object) -> str:
+    """Map CourtListener's documented Opinion.type choices conservatively."""
+
+    value = str(opinion_type or "")
+    if value.startswith(("010combined", "015unamimous", "020lead", "025plurality")):
+        return "majority"
+    if value.startswith("030concurrence"):
+        return "concurrence"
+    if value.startswith("040dissent"):
+        return "dissent"
+    # In-part, procedural and absent types are not reliable majority evidence.
+    return "unknown"
+
+
 async def startup(ctx: dict[str, Any]) -> None:
     """Reuse CourtListener connections and cap independent source downloads."""
     ctx["courtlistener_http"] = httpx.AsyncClient(
@@ -106,6 +142,19 @@ async def startup(ctx: dict[str, Any]) -> None:
         limits=httpx.Limits(max_connections=8, max_keepalive_connections=8),
     )
     ctx["embedding_semaphore"] = asyncio.Semaphore(8)
+    settings = get_settings()
+    elastic = create_elasticsearch_client(settings.elastic_cloud_id, settings.elastic_api_key)
+    if elastic is not None:
+        try:
+            await ensure_indices(elastic)
+        except ElasticUnavailable:
+            # Elastic must never keep P1's durable pipeline from starting.
+            await elastic.close()
+        else:
+            ctx["elastic"] = elastic
+            rerank_id = await probe_rerank_inference_id(elastic)
+            if rerank_id:
+                ctx["elastic_reranker"] = hosted_reranker(elastic, rerank_id)
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:
@@ -115,6 +164,9 @@ async def shutdown(ctx: dict[str, Any]) -> None:
     client = ctx.get("openai_http")
     if client is not None:
         await client.aclose()
+    client = ctx.get("elastic")
+    if client is not None:
+        await client.close()
 
 
 async def process_job(
@@ -156,6 +208,12 @@ async def _ingest_and_enqueue(ctx: dict[str, Any], job_id: str) -> None:
             await _persist_brief_pages(session, job.id, document)
             extracted = extract_citations(document)
             persisted = await _persist_citations(session, job.id, extracted)
+            try:
+                await _prime_proposition_extraction(session, persisted, extracted, document, ctx.get("openai_http"))
+            except PropositionExtractionUnavailable:
+                # Proposition extraction is best effort.  Per-citation work
+                # writes a terminal UNVERIFIABLE result when it is unavailable.
+                pass
             # FR-RES-001: resolve distinct full citations in bounded CourtListener
             # batches before citation fan-out.  Short forms reuse their
             # antecedent's cache entry in their independent task.
@@ -239,18 +297,72 @@ async def _persist_citations(session: Any, job_id: uuid.UUID, extracted: Any) ->
     for record, item in zip(records, extracted, strict=True):
         if item.antecedent_id and item.antecedent_id in by_pipeline_id:
             record.antecedent_id = by_pipeline_id[item.antecedent_id].id
-        if item.quote:
-            session.add(
-                Claim(
-                    citation_id=record.id,
-                    quote_text=item.quote.text,
-                    quote_start=item.quote.original_span.start,
-                    quote_end=item.quote.original_span.end,
-                    quote_processing_start=item.quote.processing_span.start,
-                    quote_processing_end=item.quote.processing_span.end,
-                )
+        # P2 has exactly one claim row per citation. It carries both the
+        # optional P1 quotation and the subsequently extracted proposition.
+        session.add(
+            Claim(
+                citation_id=record.id,
+                quote_text=item.quote.text if item.quote else None,
+                quote_start=item.quote.original_span.start if item.quote else None,
+                quote_end=item.quote.original_span.end if item.quote else None,
+                quote_processing_start=item.quote.processing_span.start if item.quote else None,
+                quote_processing_end=item.quote.processing_span.end if item.quote else None,
             )
+        )
     return records
+
+
+async def _prime_proposition_extraction(
+    session: Any,
+    persisted: list[Citation],
+    extracted: Any,
+    document: Any,
+    client: httpx.AsyncClient | None,
+) -> None:
+    """Extract all propositions before citation fan-out (FR-EXT-005)."""
+
+    settings = get_settings()
+    if not settings.openai_api_key or not persisted:
+        return
+    pages = {item.page: item.raw_text for item in document.pages}
+    excerpts = [
+        PropositionExcerpt(
+            str(record.id),
+            pages[item.context_span.page][item.context_span.start : item.context_span.end],
+        )
+        for record, item in zip(persisted, extracted, strict=True)
+    ]
+    propositions = await extract_propositions(settings.openai_api_key, excerpts, client)
+    for record, item in zip(persisted, extracted, strict=True):
+        proposition = propositions.get(str(record.id))
+        if proposition is None:
+            continue
+        claim = await session.scalar(select(Claim).where(Claim.citation_id == record.id))
+        if claim is None:
+            continue
+        context = pages[item.context_span.page][item.context_span.start : item.context_span.end]
+        offset = _recover_proposition_offset(context, proposition)
+        if offset is None:
+            prop_start, prop_end = item.context_span.start, item.context_span.end
+        else:
+            prop_start = item.context_span.start + offset[0]
+            prop_end = item.context_span.start + offset[1]
+        claim.proposition_text = proposition
+        claim.prop_start = prop_start
+        claim.prop_end = prop_end
+
+
+def _recover_proposition_offset(context: str, proposition: str) -> tuple[int, int] | None:
+    """Recover real offsets from document text; never use model offsets."""
+
+    direct = context.casefold().find(proposition.casefold())
+    if direct >= 0:
+        return direct, direct + len(proposition)
+    terms = [re.escape(part) for part in normalise(proposition).split()]
+    if not terms:
+        return None
+    match = re.search(r"\s+".join(terms), context, flags=re.IGNORECASE)
+    return (match.start(), match.end()) if match else None
 
 
 async def _prime_lookup_cache(session: Any, citations: list[Citation]) -> None:
@@ -393,7 +505,7 @@ async def process_citation(ctx: dict[str, Any], citation_id: str) -> None:
 
     sessionmaker = get_sessionmaker()
     source_cluster_id: str | None = None
-    quote_ready = False
+    source_ready = False
     async with sessionmaker() as session:
         citation = await session.get(Citation, uuid.UUID(citation_id))
         if citation is None:
@@ -404,7 +516,7 @@ async def process_citation(ctx: dict[str, Any], citation_id: str) -> None:
             span.set_tag("job_id", str(citation.job_id))
             span.set_tag("citation_id", citation_id)
             try:
-                source_cluster_id, quote_ready = await _resolve_citation(session, citation)
+                source_cluster_id, source_ready = await _resolve_citation(session, citation)
                 await session.commit()
             except Exception:  # keep one citation from blocking all others
                 await session.rollback()
@@ -417,14 +529,15 @@ async def process_citation(ctx: dict[str, Any], citation_id: str) -> None:
                 await _write_finding(
                     session,
                     citation,
-                    check="existence",
+                    check=CHECK_EXISTENCE,
                     verdict="UNVERIFIABLE",
                     confidence=None,
                     notes=["UPSTREAM_UNAVAILABLE"],
                     evidence={},
                 )
+                await _write_proposition_unavailable(session, citation, "UPSTREAM_UNAVAILABLE")
                 await session.commit()
-            await _publish_citation_findings(session, citation)
+            await _publish_citation_findings(session, citation, ctx.get("elastic"))
             await _maybe_finish_job(session, job_pk)
     # Queue after the short resolution transaction has committed.  A slow
     # source can therefore never replace or delay an already-known authority.
@@ -438,31 +551,34 @@ async def process_citation(ctx: dict[str, Any], citation_id: str) -> None:
             _job_id=f"source:{citation_id}",
             _defer_by=-60,
         )
-    elif quote_ready:
-        # A completed durable source needs no new acquisition task. Its quote
-        # task is independently idempotent and cannot block source fetching.
+    elif source_ready:
+        # A completed durable source needs no new acquisition task. Both
+        # downstream checks remain independently idempotent.
         await ctx["redis"].enqueue_job("process_quote", citation_id, _job_id=f"quote:{citation_id}")
+        await ctx["redis"].enqueue_job("process_proposition", citation_id, _job_id=f"proposition:{citation_id}")
 
 
 async def _resolve_citation(session: Any, citation: Citation) -> tuple[str | None, bool]:
     """Return source work to queue, or whether a local source can be checked."""
     if citation.resolution_state == AntecedentState.UNRESOLVED.value:
         await _write_finding(
-            session, citation, "existence", "UNVERIFIABLE", None, ["UNRESOLVED_REFERENCE"], {}
+            session, citation, CHECK_EXISTENCE, "UNVERIFIABLE", None, ["UNRESOLVED_REFERENCE"], {}
         )
         # A quote cannot be aligned without a resolved source.  It must still
         # reach the approved terminal state so this one short-form reference
         # cannot keep the entire brief in ``processing`` (NFR-REL-001).
         await _write_quote_unavailable(session, citation)
+        await _write_proposition_unavailable(session, citation, "UNRESOLVED_REFERENCE")
         return None, False
     target = citation
     if citation.antecedent_id:
         antecedent = await session.get(Citation, citation.antecedent_id)
         if antecedent is None:
             await _write_finding(
-                session, citation, "existence", "UNVERIFIABLE", None, ["UNRESOLVED_REFERENCE"], {}
+                session, citation, CHECK_EXISTENCE, "UNVERIFIABLE", None, ["UNRESOLVED_REFERENCE"], {}
             )
             await _write_quote_unavailable(session, citation)
+            await _write_proposition_unavailable(session, citation, "UNRESOLVED_REFERENCE")
             return None, False
         target = antecedent
 
@@ -481,9 +597,10 @@ async def _resolve_citation(session: Any, citation: Citation) -> tuple[str | Non
         if not lookups:
             citation.resolution_state = "unrecognized"
             await _write_finding(
-                session, citation, "existence", "UNVERIFIABLE", None, ["UNRECOGNIZED_REFERENCE"], {}
+                session, citation, CHECK_EXISTENCE, "UNVERIFIABLE", None, ["UNRECOGNIZED_REFERENCE"], {}
             )
             await _write_quote_unavailable(session, citation)
+            await _write_proposition_unavailable(session, citation, "UNRECOGNIZED_REFERENCE")
             return None, False
         lookup = lookups[0]
         lookup_payload = _lookup_payload(lookup)
@@ -497,7 +614,7 @@ async def _resolve_citation(session: Any, citation: Citation) -> tuple[str | Non
         await _write_finding(
             session,
             citation,
-            "existence",
+            CHECK_EXISTENCE,
             "VERIFIED",
             1.0,
             [],
@@ -505,15 +622,12 @@ async def _resolve_citation(session: Any, citation: Citation) -> tuple[str | Non
         )
         if citation.antecedent_id:
             citation.resolution_state = "resolved_via_antecedent"
-        claims = list(await session.scalars(select(Claim).where(Claim.citation_id == citation.id)))
-        if not any(claim.quote_text for claim in claims):
-            return None, False
-        # FR-RES-004 (P1 scope) only acquires a full opinion when a quote needs
-        # evidence.  Source acquisition is deduplicated by CourtListener
-        # cluster and happens in a separate durable task.
+        # FR-RES-004 (P2): every resolved authority gets a locally persisted
+        # opinion, even when the brief did not quote it.
         clusters = lookup_payload.get("clusters", [])
         if not clusters or not isinstance(clusters[0], dict) or not clusters[0].get("id"):
             await _write_quote_unavailable(session, citation)
+            await _write_proposition_unavailable(session, citation, "SOURCE_UNAVAILABLE")
             return None, False
         cluster = clusters[0]
         cluster_id = str(cluster["id"])
@@ -549,30 +663,34 @@ async def _resolve_citation(session: Any, citation: Citation) -> tuple[str | Non
             return None, True
         if acquisition.state == "unavailable":
             await _write_quote_unavailable(session, citation)
+            await _write_proposition_unavailable(session, citation, "SOURCE_UNAVAILABLE")
             return None, False
         return cluster_id, False
     elif status == 404:
         citation.resolution_state = "not_in_database"
-        await _write_finding(session, citation, "existence", "NOT_IN_DATABASE", 1.0, [], {})
+        await _write_finding(session, citation, CHECK_EXISTENCE, "NOT_IN_DATABASE", 1.0, [], {})
         await _write_quote_unavailable(session, citation)
+        await _write_proposition_unavailable(session, citation, "NOT_IN_DATABASE")
     elif status == 300:
         citation.resolution_state = "ambiguous"
         await _write_finding(
             session,
             citation,
-            "existence",
+            CHECK_EXISTENCE,
             "AMBIGUOUS",
             None,
             [],
             {"candidates": lookup_payload.get("clusters", [])},
         )
         await _write_quote_unavailable(session, citation)
+        await _write_proposition_unavailable(session, citation, "AMBIGUOUS")
     elif status == 400:
         citation.resolution_state = "unrecognized"
         await _write_finding(
-            session, citation, "existence", "UNVERIFIABLE", None, ["UNRECOGNIZED_REFERENCE"], {}
+            session, citation, CHECK_EXISTENCE, "UNVERIFIABLE", None, ["UNRECOGNIZED_REFERENCE"], {}
         )
         await _write_quote_unavailable(session, citation)
+        await _write_proposition_unavailable(session, citation, "UNRECOGNIZED_REFERENCE")
     else:
         raise CourtListenerUnavailable(f"unsupported lookup status {status}")
     return None, False
@@ -585,7 +703,7 @@ async def _fetch_source_material(client: CourtListenerClient, cluster_id: str) -
     paragraphs: list[tuple[str, str | None]] = []
     for opinion in opinions:
         text = _clean_opinion_text(opinion)
-        part = opinion.get("type") if isinstance(opinion.get("type"), str) else None
+        part = _opinion_part(opinion.get("type"))
         paragraphs.extend((paragraph, part) for paragraph in _paragraph_texts(text))
     if not paragraphs:
         return None
@@ -631,6 +749,8 @@ async def _persist_source_material(session: Any, material: SourceMaterial) -> So
 async def process_source(ctx: dict[str, Any], cluster_id: str) -> None:
     """Acquire one CourtListener cluster once, with a bounded shared budget."""
     sessionmaker = get_sessionmaker()
+    source_for_index: Source | None = None
+    paragraphs_for_index: list[SourceParagraph] = []
     async with sessionmaker() as session:
         acquisition = await session.scalar(
             select(SourceAcquisition)
@@ -658,6 +778,7 @@ async def process_source(ctx: dict[str, Any], cluster_id: str) -> None:
     if citation_ids:
         for citation_id in citation_ids:
             await ctx["redis"].enqueue_job("process_quote", str(citation_id), _job_id=f"quote:{citation_id}")
+            await ctx["redis"].enqueue_job("process_proposition", str(citation_id), _job_id=f"proposition:{citation_id}")
         return
 
     settings = get_settings()
@@ -678,6 +799,7 @@ async def process_source(ctx: dict[str, Any], cluster_id: str) -> None:
             client = CourtListenerClient(
                 settings.courtlistener_api_token,
                 client=http_client,
+                acquire_rate_limit=CourtListenerRateLimiter(get_redis()).acquire,
                 max_retries=1,
             )
             if semaphore is None:
@@ -713,6 +835,14 @@ async def process_source(ctx: dict[str, Any], cluster_id: str) -> None:
             acquisition.source_id = source.id
             acquisition.failure_code = None
             acquisition.retrieved_at = datetime.now(timezone.utc)
+            source_for_index = source
+            paragraphs_for_index = list(
+                await session.scalars(
+                    select(SourceParagraph)
+                    .where(SourceParagraph.source_id == source.id)
+                    .order_by(SourceParagraph.para_no)
+                )
+            )
         else:
             acquisition.state = "unavailable"
             acquisition.failure_code = failure_code or "UPSTREAM_UNAVAILABLE"
@@ -721,8 +851,43 @@ async def process_source(ctx: dict[str, Any], cluster_id: str) -> None:
         )
         await session.commit()
 
+    if source_for_index is not None:
+        await _index_source_best_effort(ctx, source_for_index, paragraphs_for_index)
+
     for citation_id in citation_ids:
         await ctx["redis"].enqueue_job("process_quote", str(citation_id), _job_id=f"quote:{citation_id}")
+        await ctx["redis"].enqueue_job("process_proposition", str(citation_id), _job_id=f"proposition:{citation_id}")
+
+
+async def _index_source_best_effort(
+    ctx: dict[str, Any], source: Source, paragraphs: list[SourceParagraph]
+) -> None:
+    """Mirror durable source paragraphs to Elastic without a new failure mode."""
+
+    elastic = ctx.get("elastic")
+    if elastic is None or not paragraphs:
+        return
+    vectors: dict[int, list[float]] = {}
+    api_key = get_settings().openai_api_key
+    if api_key:
+        try:
+            for start in range(0, len(paragraphs), 64):
+                batch = paragraphs[start : start + 64]
+                semaphore = ctx.get("embedding_semaphore")
+                if semaphore is None:
+                    embedded = await embed_texts(api_key, [item.text for item in batch], client=ctx.get("openai_http"))
+                else:
+                    async with semaphore:
+                        embedded = await embed_texts(
+                            api_key, [item.text for item in batch], client=ctx.get("openai_http")
+                        )
+                vectors.update({item.para_no: vector for item, vector in zip(batch, embedded, strict=True)})
+        except Exception:  # Elastic can still retain BM25-only documents.
+            vectors = {}
+    try:
+        await index_source_paragraphs(elastic, source, paragraphs, embeddings_by_para=vectors)
+    except ElasticUnavailable:
+        return
 
 
 async def process_quote(ctx: dict[str, Any], citation_id: str) -> None:
@@ -765,6 +930,7 @@ async def process_quote(ctx: dict[str, Any], citation_id: str) -> None:
                 *quote_work,
                 embedding_client=ctx.get("openai_http"),
                 embedding_semaphore=ctx.get("embedding_semaphore"),
+                elastic_client=ctx.get("elastic"),
             )
         except asyncio.CancelledError:
             raise
@@ -783,10 +949,137 @@ async def process_quote(ctx: dict[str, Any], citation_id: str) -> None:
         if source_unavailable:
             await _write_quote_unavailable(session, citation)
         for verdict, confidence, notes, evidence in quote_results:
-            await _write_finding(session, citation, "quote", verdict, confidence, notes, evidence)
+            await _write_finding(session, citation, CHECK_QUOTE, verdict, confidence, notes, evidence)
         await session.commit()
-        await _publish_citation_findings(session, citation)
+        await _publish_citation_findings(session, citation, ctx.get("elastic"))
         await _maybe_finish_job(session, job_id)
+
+
+async def process_proposition(ctx: dict[str, Any], citation_id: str) -> None:
+    """Retrieve evidence and validate one bounded proposition judgement."""
+
+    sessionmaker = get_sessionmaker()
+    work: tuple[Citation, Source, str] | None = None
+    job_id: uuid.UUID | None = None
+    async with sessionmaker() as session:
+        citation = await session.get(Citation, uuid.UUID(citation_id))
+        if citation is None:
+            return
+        job_id = citation.job_id
+        claim = await session.scalar(select(Claim).where(Claim.citation_id == citation.id))
+        acquisition = (
+            await session.get(SourceAcquisition, citation.source_acquisition_id)
+            if citation.source_acquisition_id
+            else None
+        )
+        if claim is None or not claim.proposition_text:
+            await _write_proposition_unavailable(session, citation, "PROPOSITION_UNAVAILABLE")
+        elif acquisition is None or acquisition.state != "fetched" or not acquisition.source_id:
+            await _write_proposition_unavailable(session, citation, "SOURCE_UNAVAILABLE")
+        else:
+            source = await session.get(Source, acquisition.source_id)
+            if source is None:
+                await _write_proposition_unavailable(session, citation, "SOURCE_UNAVAILABLE")
+            else:
+                work = (citation, source, claim.proposition_text)
+        await session.commit()
+        await _publish_citation_findings(session, citation, ctx.get("elastic"))
+        await _maybe_finish_job(session, citation.job_id)
+
+    if work is None:
+        return
+    citation, source, proposition = work
+    result = None
+    retrieved: list[RetrievedParagraph] = []
+    unavailable_reason: str | None = None
+    try:
+        elastic = ctx.get("elastic")
+        if elastic is None:
+            raise ElasticUnavailable("Elastic is not configured")
+        with sentry_sdk.start_span(op="proposition.retrieval", name="retrieve_paragraphs"):
+            retrieved = await retrieve_paragraphs(
+                elastic,
+                str(source.id),
+                proposition,
+                load_proposition_thresholds().top_k_paragraphs,
+                embed_query=lambda text: _embed_proposition(ctx, text),
+                rerank=ctx.get("elastic_reranker"),
+            )
+        if not retrieved:
+            unavailable_reason = "NO_RETRIEVED_EVIDENCE"
+        elif not get_settings().openai_api_key:
+            unavailable_reason = "JUDGE_NOT_CONFIGURED"
+        else:
+            judge_paragraphs = [
+                JudgeParagraph(item.para_id, item.opinion_part, item.text) for item in retrieved
+            ]
+            # Raw HTTP keeps the OpenAI key server-side, so record the AI
+            # boundary explicitly for Sentry's tracing/AI-monitoring view.
+            with sentry_sdk.start_span(op="ai.generate_text", name="openai.proposition_judge") as span:
+                span.set_tag("ai.provider", "openai")
+                span.set_tag("ai.model", "gpt-4o-mini")
+                raw = await call_judge(
+                    get_settings().openai_api_key,
+                    proposition,
+                    judge_paragraphs,
+                    ctx.get("openai_http"),
+                )
+            result = evaluate_proposition(raw, judge_paragraphs)
+    except (ElasticUnavailable, EmbeddingUnavailable, JudgeUnavailable):
+        unavailable_reason = "UPSTREAM_UNAVAILABLE"
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        sentry_sdk.capture_exception()
+        unavailable_reason = "UPSTREAM_UNAVAILABLE"
+
+    async with sessionmaker() as session:
+        persisted = await session.get(Citation, citation.id)
+        if persisted is None:
+            return
+        if result is None:
+            await _write_proposition_unavailable(session, persisted, unavailable_reason or "UPSTREAM_UNAVAILABLE")
+        else:
+            evidence = {
+                "source_id": str(source.id),
+                "paragraphs": [
+                    {
+                        "para_id": item.para_id,
+                        "opinion_part": item.opinion_part,
+                        "page": item.page,
+                    }
+                    for item in retrieved
+                    if item.para_id in result.cited_paragraph_ids
+                ],
+                "cited_paragraph_ids": list(result.cited_paragraph_ids),
+            }
+            rationale = result.rationale or "Pincite could not validate the judge response against the retrieved evidence."
+            await _write_finding(
+                session,
+                persisted,
+                CHECK_PROPOSITION,
+                result.verdict.value,
+                result.confidence,
+                list(result.notes) + ([result.reason] if result.reason else []),
+                evidence,
+                rationale=rationale,
+            )
+        await session.commit()
+        await _publish_citation_findings(session, persisted, ctx.get("elastic"))
+        await _maybe_finish_job(session, persisted.job_id)
+
+
+async def _embed_proposition(ctx: dict[str, Any], text: str) -> list[float] | None:
+    api_key = get_settings().openai_api_key
+    if not api_key:
+        return None
+    semaphore = ctx.get("embedding_semaphore")
+    if semaphore is None:
+        vectors = await embed_texts(api_key, [text], client=ctx.get("openai_http"))
+    else:
+        async with semaphore:
+            vectors = await embed_texts(api_key, [text], client=ctx.get("openai_http"))
+    return vectors[0] if vectors else None
 
 
 async def _quote_check(
@@ -798,6 +1091,7 @@ async def _quote_check(
     embedding_client: httpx.AsyncClient | None = None,
     embedding_semaphore: asyncio.Semaphore | None = None,
     semantic_check_enabled: bool = True,
+    elastic_client: Any | None = None,
 ) -> list[tuple[str, float | None, list[str], dict[str, Any]]]:
     findings: list[tuple[str, float | None, list[str], dict[str, Any]]] = []
     for claim in claims:
@@ -809,6 +1103,21 @@ async def _quote_check(
         # on a bounded local window.  This is retrieval, not a verdict—the
         # checker and its evidence remain entirely deterministic and local.
         verification_paragraphs = _quote_verification_candidates(claim.quote_text, paragraphs)
+        if elastic_client is not None:
+            try:
+                elastic_candidates = await retrieve_quote_candidates(
+                    elastic_client, str(source.id), claim.quote_text
+                )
+                by_para_no = {item.para_no: item for item in paragraphs}
+                verification_paragraphs = [
+                    by_para_no[item.para_no]
+                    for item in elastic_candidates
+                    if item.para_no in by_para_no
+                ] or verification_paragraphs
+            except ElasticUnavailable:
+                # ADR-010: preserve P1's deterministic local source when the
+                # new candidate index is unavailable.
+                pass
         verdict_paragraphs = [
             VerdictParagraph(str(item.id), item.text, item.page, item.opinion_part)
             for item in verification_paragraphs
@@ -854,11 +1163,16 @@ async def _quote_check(
                 "paragraph_id": result.closest_passage.paragraph_id,
                 "text": result.closest_passage.text,
             }
+        opinion_notes = (
+            _opinion_part_note(result.evidence.paragraph_id, verification_paragraphs)
+            if result.evidence
+            else []
+        )
         findings.append(
             (
                 result.verdict.value,
                 result.confidence,
-                [*result.notes, f"SEMANTIC_CHECK_{result.semantic_check_status.value}"],
+                [*result.notes, *opinion_notes, f"SEMANTIC_CHECK_{result.semantic_check_status.value}"],
                 evidence,
             )
         )
@@ -897,6 +1211,19 @@ def _semantic_candidates(quote: str, paragraphs: list[SourceParagraph]) -> list[
     return [(str(item.id), item.text) for item in ranked[:32]]
 
 
+def _opinion_part_note(paragraph_id: str, paragraphs: list[SourceParagraph]) -> list[str]:
+    """Flag quote evidence from a non-majority or indeterminate opinion."""
+
+    paragraph = next((item for item in paragraphs if str(item.id) == paragraph_id), None)
+    if paragraph is None or paragraph.opinion_part == "unknown" or paragraph.opinion_part is None:
+        return ["OPINION_PART_UNKNOWN"]
+    if paragraph.opinion_part == "dissent":
+        return ["QUOTED_FROM_DISSENT"]
+    if paragraph.opinion_part == "concurrence":
+        return ["QUOTED_FROM_CONCURRENCE"]
+    return []
+
+
 def _pinpoint_page(pinpoint: str | None) -> int | None:
     """Use the first numeric pinpoint for P1's informational page note."""
     if not pinpoint:
@@ -908,7 +1235,22 @@ def _pinpoint_page(pinpoint: str | None) -> int | None:
 async def _write_quote_unavailable(session: Any, citation: Citation) -> None:
     claims = list(await session.scalars(select(Claim).where(Claim.citation_id == citation.id)))
     if any(claim.quote_text for claim in claims):
-        await _write_finding(session, citation, "quote", "SOURCE_UNAVAILABLE", 0.0, [], {})
+        await _write_finding(session, citation, CHECK_QUOTE, "SOURCE_UNAVAILABLE", 0.0, [], {})
+
+
+async def _write_proposition_unavailable(session: Any, citation: Citation, reason: str) -> None:
+    """Every citation gets a terminal proposition finding, even without a source."""
+
+    await _write_finding(
+        session,
+        citation,
+        CHECK_PROPOSITION,
+        PropositionVerdict.UNVERIFIABLE.value,
+        0.0,
+        [reason],
+        {},
+        rationale="Pincite could not verify this proposition from a retrieved court opinion.",
+    )
 
 
 async def _write_finding(
@@ -919,22 +1261,40 @@ async def _write_finding(
     confidence: float | None,
     notes: list[str],
     evidence: dict[str, Any],
+    *,
+    rationale: str | None = None,
 ) -> Finding:
     existing = await session.scalar(
         select(Finding).where(Finding.citation_id == citation.id, Finding.check == check)
     )
     if existing is None:
-        existing = Finding(citation_id=citation.id, check=check, verdict=verdict, confidence=confidence, notes=notes, evidence=evidence)
+        existing = Finding(
+            citation_id=citation.id,
+            check=check,
+            verdict=verdict,
+            confidence=confidence,
+            notes=notes,
+            evidence=evidence,
+            rationale=rationale,
+        )
         session.add(existing)
     else:
         existing.verdict, existing.confidence, existing.notes, existing.evidence = verdict, confidence, notes, evidence
+        existing.rationale = rationale
     await session.flush()
     return existing
 
 
-async def _publish_citation_findings(session: Any, citation: Citation) -> None:
+async def _publish_citation_findings(
+    session: Any, citation: Citation, elastic_client: Any | None = None
+) -> None:
     findings = list(await session.scalars(select(Finding).where(Finding.citation_id == citation.id)))
     for finding in findings:
+        if elastic_client is not None:
+            try:
+                await index_finding(elastic_client, finding, citation)
+            except ElasticUnavailable:
+                pass
         await publish_event(
             str(citation.job_id),
             "finding.created",
@@ -944,6 +1304,7 @@ async def _publish_citation_findings(session: Any, citation: Citation) -> None:
                 "check": finding.check,
                 "verdict": finding.verdict,
                 "confidence": finding.confidence,
+                "rationale": finding.rationale,
                 "created_at": finding.created_at.isoformat(),
             },
         )
@@ -954,7 +1315,7 @@ async def _maybe_finish_job(session: Any, job_id: uuid.UUID) -> None:
     existence_complete = await session.scalar(
         select(func.count(Finding.id))
         .join(Citation, Finding.citation_id == Citation.id)
-        .where(Citation.job_id == job_id, Finding.check == "existence")
+        .where(Citation.job_id == job_id, Finding.check == CHECK_EXISTENCE)
     )
     quote_required = await session.scalar(
         select(func.count(func.distinct(Citation.id)))
@@ -964,14 +1325,29 @@ async def _maybe_finish_job(session: Any, job_id: uuid.UUID) -> None:
     quote_complete = await session.scalar(
         select(func.count(func.distinct(Finding.citation_id)))
         .join(Citation, Finding.citation_id == Citation.id)
-        .where(Citation.job_id == job_id, Finding.check == "quote")
+        .where(Citation.job_id == job_id, Finding.check == CHECK_QUOTE)
     )
-    if total and total == existence_complete and quote_required == quote_complete:
+    proposition_complete = await session.scalar(
+        select(func.count(func.distinct(Finding.citation_id)))
+        .join(Citation, Finding.citation_id == Citation.id)
+        .where(Citation.job_id == job_id, Finding.check == CHECK_PROPOSITION)
+    )
+    if total and total == existence_complete and quote_required == quote_complete and total == proposition_complete:
         job = await session.get(Job, job_id)
         if job and job.status != JobStatus.COMPLETED.value:
             await _complete_job(session, job)
             await session.commit()
-            await publish_event(str(job_id), "job.completed", {"summary": {}})
+            await publish_event(str(job_id), "job.completed", {"summary": await _job_summary(session, job_id)})
+
+
+async def _job_summary(session: Any, job_id: uuid.UUID) -> dict[str, int]:
+    rows = await session.execute(
+        select(Finding.verdict, func.count(Finding.id))
+        .join(Citation, Finding.citation_id == Citation.id)
+        .where(Citation.job_id == job_id)
+        .group_by(Finding.verdict)
+    )
+    return {str(verdict): int(count) for verdict, count in rows.all()}
 
 
 async def _complete_job(session: Any, job: Job) -> None:

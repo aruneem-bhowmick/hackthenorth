@@ -190,6 +190,7 @@ class Finding(Base):
     verdict: Mapped[str] = mapped_column(String(64), nullable=False)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     notes: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False, default=list)
+    rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     evidence: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False

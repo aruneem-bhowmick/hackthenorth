@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     sentry_environment: str = "development"
     courtlistener_api_token: str | None = None
     openai_api_key: str | None = None
+    # P2 paragraph indexing/retrieval is deliberately optional.  The worker
+    # keeps P1's Postgres-backed review flow available when Elastic has not
+    # yet been provisioned (or is temporarily unavailable).
+    elastic_cloud_id: str | None = None
+    elastic_api_key: str | None = None
 
     @field_validator("database_url", mode="before")
     @classmethod

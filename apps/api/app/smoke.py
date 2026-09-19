@@ -70,12 +70,17 @@ async def check_elastic(settings: Settings) -> DependencyStatus:
     if not settings.elastic_cloud_id or not settings.elastic_api_key:
         return DependencyStatus(status="not_configured")
     try:
+        from elastic_transport import HttpxAsyncHttpNode
         from elasticsearch import AsyncElasticsearch
 
         es = AsyncElasticsearch(
             cloud_id=settings.elastic_cloud_id,
             api_key=settings.elastic_api_key,
             request_timeout=5.0,
+            # The workspace already uses httpx. Pin the async transport to it
+            # instead of Elasticsearch's optional aiohttp default so a health
+            # probe remains deployable in the existing Railway image.
+            node_class=HttpxAsyncHttpNode,
         )
         try:
             await es.info()

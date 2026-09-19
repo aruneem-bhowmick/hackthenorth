@@ -12,6 +12,7 @@ type Finding = {
   verdict: string;
   confidence: number | null;
   notes: string[];
+  rationale: string | null;
   evidence: Record<string, unknown>;
 };
 type Claim = {
@@ -60,22 +61,45 @@ type DiffItem = {
 };
 type CitationSpan = { id: string; start: number; end: number };
 type BriefPage = { page: number; text: string; citations: CitationSpan[] };
+type VerdictDetails = {
+  label: string;
+  tone: "green" | "yellow" | "red" | "grey";
+  tooltip: string;
+};
 
-function verdictDetails(verdict?: string) {
-  const details: Record<string, { label: string; tone: "green" | "yellow" | "red" | "grey" }> = {
-    VERIFIED: { label: "Case located", tone: "green" },
-    AMBIGUOUS: { label: "More than one possible case", tone: "yellow" },
-    NOT_IN_DATABASE: { label: "Not located in CourtListener", tone: "grey" },
-    UNRECOGNIZED: { label: "Citation could not be recognised", tone: "grey" },
-    PENDING: { label: "Checking source", tone: "grey" },
-    VERBATIM: { label: "Quote matches source", tone: "green" },
-    VERBATIM_WITH_PERMITTED_ALTERATIONS: { label: "Quote matches; legal alteration used", tone: "green" },
-    ALTERED: { label: "Quote differs from source", tone: "yellow" },
-    PARAPHRASE_IN_QUOTES: { label: "Quoted text appears paraphrased", tone: "yellow" },
-    NOT_FOUND_IN_SOURCE: { label: "No matching language found", tone: "red" },
-    SOURCE_UNAVAILABLE: { label: "Source unavailable", tone: "grey" },
+function verdictDetails(verdict?: string): VerdictDetails {
+  const details: Record<string, VerdictDetails> = {
+    VERIFIED: { label: "Case located", tone: "green", tooltip: "Pincite found a matching record for this citation in CourtListener." },
+    AMBIGUOUS: { label: "More than one possible case", tone: "yellow", tooltip: "Pincite found more than one possible source and could not choose one reliably." },
+    NOT_IN_DATABASE: { label: "Not located in CourtListener", tone: "grey", tooltip: "Pincite did not find a matching record in CourtListener." },
+    UNRECOGNIZED: { label: "Citation could not be recognised", tone: "grey", tooltip: "Pincite could not read this citation well enough to check it." },
+    PENDING: { label: "Checking source", tone: "grey", tooltip: "Pincite is still checking the source material for this citation." },
+    VERBATIM: { label: "Quote matches source", tone: "green", tooltip: "The quoted words match the source passage Pincite checked." },
+    VERBATIM_WITH_PERMITTED_ALTERATIONS: { label: "Quote matches; legal alteration used", tone: "green", tooltip: "The quote matches the source, including a standard bracket or ellipsis alteration." },
+    ALTERED: { label: "Quote differs from source", tone: "yellow", tooltip: "Some quoted wording differs from the source passage. Review the linked source text." },
+    PARAPHRASE_IN_QUOTES: { label: "Quoted text appears paraphrased", tone: "yellow", tooltip: "The quoted wording appears similar to, but does not match, source language." },
+    NOT_FOUND_IN_SOURCE: { label: "No matching language found", tone: "red", tooltip: "Pincite did not find the quoted language in the source material it checked." },
+    SOURCE_UNAVAILABLE: { label: "Source unavailable", tone: "grey", tooltip: "Pincite could not obtain source text for this comparison." },
+    SUPPORTS: { label: "Source supports this point", tone: "green", tooltip: "The cited source passages directly support the point Pincite checked." },
+    PARTIAL: { label: "Source partly supports this point", tone: "yellow", tooltip: "The source passages address only part of the point, or come from a non-majority opinion." },
+    CONTRADICTS: { label: "Source points the other way", tone: "red", tooltip: "The cited source passages point in a different direction from the point Pincite checked." },
+    NOT_ADDRESSED: { label: "Source does not address this point", tone: "yellow", tooltip: "The retrieved source passages do not discuss the point Pincite checked." },
+    UNVERIFIABLE: { label: "Support could not be verified", tone: "grey", tooltip: "Pincite could not validate this result from the available source evidence." },
   };
-  return details[verdict ?? ""] ?? { label: verdict?.replaceAll("_", " ") || "Awaiting check", tone: "grey" as const };
+  return details[verdict ?? ""] ?? {
+    label: verdict?.replaceAll("_", " ") || "Awaiting check",
+    tone: "grey",
+    tooltip: "Pincite does not yet have a plain-language explanation for this result.",
+  };
+}
+
+function VerdictBadge({ verdict }: { verdict?: string }) {
+  const details = verdictDetails(verdict);
+  return <span
+    aria-label={`${details.label}. ${details.tooltip}`}
+    className={`${styles.verdict} ${styles[`verdict${details.tone[0].toUpperCase()}${details.tone.slice(1)}`]}`}
+    title={details.tooltip}
+  >{details.label}</span>;
 }
 
 function worstTone(findings: Finding[]) {
@@ -99,26 +123,52 @@ function sourceIdFrom(findings: Finding[]) {
   return null;
 }
 
-function paragraphIdFrom(findings: Finding[]) {
+function citedParagraphIdsFrom(findings: Finding[]) {
+  const ids = new Set<string>();
   for (const finding of findings) {
+    const cited = finding.evidence.cited_paragraph_ids ?? finding.evidence.citedParagraphIds;
+    if (Array.isArray(cited)) {
+      for (const id of cited) if (typeof id === "string") ids.add(id);
+    }
     const candidate = finding.evidence.paragraph_id ?? finding.evidence.paragraphId;
-    if (typeof candidate === "string") return candidate;
+    if (typeof candidate === "string") ids.add(candidate);
     const paragraphs = finding.evidence.paragraphs;
-    if (Array.isArray(paragraphs) && typeof paragraphs[0] === "object" && paragraphs[0] && "para_id" in paragraphs[0]) {
-      const id = (paragraphs[0] as { para_id?: unknown }).para_id;
-      if (typeof id === "string") return id;
+    if (Array.isArray(paragraphs)) {
+      for (const paragraph of paragraphs) {
+        if (typeof paragraph !== "object" || !paragraph || !("para_id" in paragraph)) continue;
+        const id = (paragraph as { para_id?: unknown }).para_id;
+        if (typeof id === "string") ids.add(id);
+      }
     }
     const closest = finding.evidence.closest_actual_language;
     if (typeof closest === "object" && closest && "paragraph_id" in closest) {
       const id = (closest as { paragraph_id?: unknown }).paragraph_id;
-      if (typeof id === "string") return id;
+      if (typeof id === "string") ids.add(id);
     }
   }
-  return null;
+  return [...ids];
+}
+
+function sourceParagraphIdsFor(source: Source, evidenceIds: string[]) {
+  return evidenceIds.flatMap((evidenceId) => {
+    const directMatch = source.paragraphs.find((paragraph) => paragraph.id === evidenceId);
+    if (directMatch) return [directMatch.id];
+
+    // Elastic's paragraph document IDs are stable `source_id:p{para_no}`
+    // values. The source API exposes the persisted paragraph UUID, so map the
+    // former to the latter before scrolling or applying a source highlight.
+    const paraNo = /:p(\d+)$/.exec(evidenceId)?.[1];
+    const paragraph = paraNo ? source.paragraphs.find((item) => item.para_no === Number(paraNo)) : null;
+    return paragraph ? [paragraph.id] : [];
+  });
 }
 
 function quoteFinding(citation: Citation | null) {
   return citation?.findings.find((finding) => finding.check === "quote" || finding.check === "QTE" || finding.check === "quote_fidelity") ?? null;
+}
+
+function propositionFinding(citation: Citation | null) {
+  return citation?.findings.find((finding) => finding.check === "proposition") ?? null;
 }
 
 function readDiff(finding: Finding | null): DiffItem[] {
@@ -186,6 +236,7 @@ export default function Home() {
   const [briefPages, setBriefPages] = useState<BriefPage[]>([]);
   const [selectedCitationId, setSelectedCitationId] = useState<string | null>(null);
   const [source, setSource] = useState<Source | null>(null);
+  const [activeParagraphIds, setActiveParagraphIds] = useState<Set<string>>(() => new Set());
   const [sourceStatus, setSourceStatus] = useState("Select a citation to inspect its source.");
   const [error, setError] = useState<string | null>(null);
   const eventSource = useRef<EventSource | null>(null);
@@ -196,6 +247,7 @@ export default function Home() {
     [citations, selectedCitationId],
   );
   const selectedQuoteFinding = quoteFinding(selectedCitation);
+  const selectedPropositionFinding = propositionFinding(selectedCitation);
   const citationsById = useMemo(() => new Map(citations.map((citation) => [citation.id, citation])), [citations]);
 
   useEffect(() => {
@@ -224,9 +276,10 @@ export default function Home() {
 
   async function loadSource(citation: Citation) {
     const sourceId = sourceIdFrom(citation.findings);
-    const paragraphId = paragraphIdFrom(citation.findings);
+    const paragraphIds = citedParagraphIdsFrom(citation.findings);
     setSelectedCitationId(citation.id);
     setSource(null);
+    setActiveParagraphIds(new Set(paragraphIds));
 
     if (!sourceId) {
       if (citation.source_state === "queued" || citation.source_state === "fetching") {
@@ -244,15 +297,26 @@ export default function Home() {
       const response = await fetch(`${API_BASE}/api/sources/${sourceId}`);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const nextSource = (await response.json()) as Source;
+      const sourceParagraphIds = sourceParagraphIdsFor(nextSource, paragraphIds);
       setSource(nextSource);
+      setActiveParagraphIds(new Set(sourceParagraphIds));
       setSourceStatus("Source text loaded.");
       window.requestAnimationFrame(() => {
-        const target = paragraphId ? document.getElementById(`source-paragraph-${paragraphId}`) : sourcePane.current;
+        const target = sourceParagraphIds[0] ? document.getElementById(`source-paragraph-${sourceParagraphIds[0]}`) : sourcePane.current;
         target?.scrollIntoView({ behavior: "smooth", block: "center" });
       });
     } catch {
       setSourceStatus("The source text could not be loaded. The citation result remains available for review.");
     }
+  }
+
+  function highlightParagraphs(paragraphIds: string[]) {
+    const sourceParagraphIds = source ? sourceParagraphIdsFor(source, paragraphIds) : paragraphIds;
+    setActiveParagraphIds(new Set(sourceParagraphIds));
+    window.requestAnimationFrame(() => {
+      const target = sourceParagraphIds[0] ? document.getElementById(`source-paragraph-${sourceParagraphIds[0]}`) : sourcePane.current;
+      target?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
   }
 
   function connectEvents(activeJobId: string, reviewToken: string) {
@@ -301,6 +365,7 @@ export default function Home() {
     setBriefPages([]);
     setSelectedCitationId(null);
     setSource(null);
+    setActiveParagraphIds(new Set());
     setSourceStatus("Citations will appear here as they are extracted.");
     setJobStatus("Uploading brief…");
 
@@ -320,14 +385,14 @@ export default function Home() {
     }
   }
 
-  const activeParagraphId = selectedCitation ? paragraphIdFrom(selectedCitation.findings) : null;
   const diff = readDiff(selectedQuoteFinding);
+  const propositionParagraphIds = selectedPropositionFinding ? citedParagraphIdsFrom([selectedPropositionFinding]) : [];
 
   return (
     <main className={styles.page}>
       <header className={styles.header}>
         <div>
-          <p className={styles.eyebrow}>Pincite · P1 review</p>
+          <p className={styles.eyebrow}>Pincite · Citation review</p>
           <h1>Check cited authority against the source text.</h1>
         </div>
         <p className={styles.disclaimer}>Pincite reports differences between a document and the sources it cites. It is not legal advice and does not assess anyone&apos;s intent. Always review the linked source text yourself.</p>
@@ -402,9 +467,8 @@ export default function Home() {
                   <span className={styles.citationMeta}>Page {citation.page ?? "—"}{citation.pinpoint ? ` · pinpoint ${citation.pinpoint}` : ""}</span>
                   <span className={styles.verdictRow}>
                     {citation.findings.length ? citation.findings.map((finding) => {
-                      const details = verdictDetails(finding.verdict);
-                      return <span className={`${styles.verdict} ${styles[`verdict${details.tone[0].toUpperCase()}${details.tone.slice(1)}`]}`} key={finding.id}>{details.label}</span>;
-                    }) : <span className={`${styles.verdict} ${styles.verdictGrey}`}>Awaiting result</span>}
+                      return <VerdictBadge key={finding.id} verdict={finding.verdict} />;
+                    }) : <VerdictBadge verdict="PENDING" />}
                   </span>
                 </button>
               );
@@ -427,12 +491,13 @@ export default function Home() {
             <>
               <section className={styles.citationContext} aria-label="Selected citation">
                 <p><strong>Citation:</strong> {selectedCitation.raw_text}</p>
+                {selectedCitation.claims[0]?.proposition_text && <p><strong>Point checked:</strong> {selectedCitation.claims[0].proposition_text}</p>}
                 {selectedCitation.claims[0]?.quote_text && <p><strong>Quoted in brief:</strong> “{selectedCitation.claims[0].quote_text}”</p>}
               </section>
 
               {selectedQuoteFinding && <section className={styles.diffCard} aria-labelledby="diff-heading">
                 <h3 id="diff-heading">Quote comparison</h3>
-                <p className={`${styles.verdict} ${styles[`verdict${verdictDetails(selectedQuoteFinding.verdict).tone[0].toUpperCase()}${verdictDetails(selectedQuoteFinding.verdict).tone.slice(1)}`]}`}>{verdictDetails(selectedQuoteFinding.verdict).label}</p>
+                <VerdictBadge verdict={selectedQuoteFinding.verdict} />
                 {diff.length > 0 ? <div className={styles.diff} aria-label="Word-level quote diff">
                   {diff.map((item, index) => <span className={styles[`diff${item.operation[0].toUpperCase()}${item.operation.slice(1)}`]} key={`${item.operation}-${index}`}>
                     {item.operation === "insert" ? item.source_tokens.join(" ") : item.quote_tokens.join(" ")}
@@ -442,9 +507,26 @@ export default function Home() {
                 {selectedQuoteFinding.notes.length > 0 && <p className={styles.muted}>{selectedQuoteFinding.notes.join(" · ")}</p>}
               </section>}
 
+              {selectedPropositionFinding && <section className={styles.rationaleCard} aria-labelledby="rationale-heading">
+                <h3 id="rationale-heading">Proposition support</h3>
+                <VerdictBadge verdict={selectedPropositionFinding.verdict} />
+                <p>{selectedPropositionFinding.rationale ?? "Pincite could not provide a rationale from the available source evidence."}</p>
+                {propositionParagraphIds.length > 0 && <p className={styles.evidenceLinks}>
+                  <strong>Source passages:</strong>{" "}
+                  {propositionParagraphIds.map((paragraphId, index) => <span key={paragraphId}>
+                    {index > 0 && ", "}
+                    <a
+                      href={`#source-paragraph-${source ? sourceParagraphIdsFor(source, [paragraphId])[0] ?? paragraphId : paragraphId}`}
+                      onClick={() => highlightParagraphs(propositionParagraphIds)}
+                    >Paragraph {index + 1}</a>
+                  </span>)}
+                </p>}
+                {selectedPropositionFinding.notes.length > 0 && <p className={styles.muted}>{selectedPropositionFinding.notes.join(" · ")}</p>}
+              </section>}
+
               <p className={styles.sourceStatus} aria-live="polite">{sourceStatus}</p>
               {source && <div className={styles.sourceText}>
-                {source.paragraphs.map((paragraph) => <p className={paragraph.id === activeParagraphId ? styles.activeParagraph : undefined} id={`source-paragraph-${paragraph.id}`} key={paragraph.id}>
+                {source.paragraphs.map((paragraph) => <p className={activeParagraphIds.has(paragraph.id) ? styles.activeParagraph : undefined} id={`source-paragraph-${paragraph.id}`} key={paragraph.id}>
                   <span className={styles.paragraphMarker}>¶ {paragraph.para_no}{paragraph.page ? ` · p. ${paragraph.page}` : ""}</span>
                   {paragraph.text}
                 </p>)}

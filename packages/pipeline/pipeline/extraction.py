@@ -103,6 +103,18 @@ def _sentence_bounds(text: str, position: int) -> tuple[int, int, int, int]:
     return current_start, current_end, previous_start, previous_end
 
 
+def _context_span_for(page: PageText, citation_start: int) -> TextSpan:
+    """Return the same two-sentence window used for quote attachment.
+
+    The window includes the sentence containing the citation and its immediate
+    predecessor.  This gives proposition extraction enough argumentative
+    context without allowing an LLM to inspect arbitrary brief text.
+    """
+
+    current_start, current_end, previous_start, _ = _sentence_bounds(page.normalised.text, citation_start)
+    return page.normalised.original_span(page.page, previous_start, current_end)
+
+
 def _find_quote_in_range(text: str, start: int, end: int) -> tuple[int, int] | None:
     quoted: list[tuple[int, int]] = []
     for match in _QUOTED.finditer(text, start, end):
@@ -292,6 +304,7 @@ def extract_citations(document: IngestedDocument) -> tuple[Citation, ...]:
                 kind=_citation_kind(parsed),
                 original_span=raw_span,
                 processing_span=TextSpan(page.page, start, end),
+                context_span=_context_span_for(page, start),
                 pinpoint=_pinpoints(parsed),
                 case_name=_case_name(meta),
                 court_hint=str(meta["court"]) if meta.get("court") else None,

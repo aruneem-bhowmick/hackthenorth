@@ -95,6 +95,10 @@ class Citation:
     kind: CitationKind
     original_span: TextSpan
     processing_span: TextSpan
+    # A deterministic, bounded sentence window used by P2 proposition
+    # extraction.  It is deliberately a real original-text span so model
+    # output can be located again without trusting model-reported offsets.
+    context_span: TextSpan
     pinpoint: tuple[str, ...] = ()
     case_name: str | None = None
     court_hint: str | None = None

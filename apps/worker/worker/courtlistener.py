@@ -172,6 +172,11 @@ class CourtListenerClient:
     async def _get_json(self, client: httpx.AsyncClient, url: str) -> dict[str, Any]:
         for attempt in range(self._max_retries + 1):
             try:
+                # P2 expands full-opinion acquisition to every resolved
+                # citation.  Apply the shared bucket to those GETs as well as
+                # the citation-lookup POST, preventing an opinion-fetch burst.
+                if self._acquire_rate_limit:
+                    await self._acquire_rate_limit(1)
                 response = await client.get(url, headers={"Authorization": f"Token {self._token}"})
             except httpx.HTTPError as exc:
                 if attempt == self._max_retries:

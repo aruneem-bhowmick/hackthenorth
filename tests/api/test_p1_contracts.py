@@ -8,6 +8,7 @@ from app.schemas import (
     CitationSpanEvent,
     CitationsExtractedEvent,
     FindingCreatedEvent,
+    FindingResponse,
     SourceResponse,
 )
 
@@ -31,9 +32,9 @@ def test_p1_sse_payloads_include_stable_ids_and_original_spans() -> None:
     finding = FindingCreatedEvent(
         finding_id=finding_id,
         citation_id=citation_id,
-        check="existence",
-        verdict="VERIFIED",
-        confidence=1.0,
+        check="proposition",
+        verdict="SUPPORTS",
+        confidence=0.82,
         created_at=now,
     )
 
@@ -41,6 +42,16 @@ def test_p1_sse_payloads_include_stable_ids_and_original_spans() -> None:
         {"id": str(citation_id), "page": 7, "start": 1022, "end": 1180}
     ]
     assert finding.model_dump(mode="json")["finding_id"] == str(finding_id)
+
+    response = FindingResponse(
+        id=finding_id,
+        check="proposition",
+        verdict="SUPPORTS",
+        confidence=0.82,
+        rationale="The cited passage directly addresses the stated point.",
+        created_at=now,
+    )
+    assert response.rationale == "The cited passage directly addresses the stated point."
 
 
 def test_source_contract_keeps_p3_provenance_explicitly_unavailable() -> None:

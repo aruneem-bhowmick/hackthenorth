@@ -12,6 +12,7 @@ dependencies = [
     "watchfiles>=1.0",
     "truststore>=0.9",
     "httpx>=0.27",
+    "elasticsearch>=8.15",
     "pincite-pipeline",
     "pincite-verdicts",
 ]

@@ -262,6 +262,7 @@ def _to_citation_response(citation: Citation) -> CitationResponse:
                 verdict=finding.verdict,
                 confidence=finding.confidence,
                 notes=finding.notes,
+                rationale=finding.rationale,
                 evidence=finding.evidence,
                 created_at=finding.created_at,
             )

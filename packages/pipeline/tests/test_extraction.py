@@ -49,6 +49,15 @@ def test_citation_spans_remain_on_the_source_page() -> None:
     assert "410 U.S. 113" in citation.raw_text
 
 
+def test_context_span_is_a_bounded_original_sentence_window() -> None:
+    raw = "The first sentence supplies context. Roe v. Wade, 410 U.S. 113 (1973), supports privacy. Later text."
+    citation = extract_citations(document(raw))[0]
+
+    assert citation.context_span.page == 1
+    context = raw[citation.context_span.start : citation.context_span.end]
+    assert context == "The first sentence supplies context. Roe v. Wade, 410 U.S. 113 (1973), supports privacy."
+
+
 def test_attaches_inline_and_preceding_sentence_quotes_only() -> None:
     inline = extract_citations(document('"The Court held this." Roe v. Wade, 410 U.S. 113 (1973).'))[0]
     preceding = extract_citations(

@@ -7,7 +7,15 @@ import sentry_sdk
 from arq.connections import RedisSettings
 
 from worker.config import get_settings
-from worker.tasks import process_citation, process_job, process_quote, process_source, shutdown, startup
+from worker.tasks import (
+    process_citation,
+    process_job,
+    process_proposition,
+    process_quote,
+    process_source,
+    shutdown,
+    startup,
+)
 
 _settings = get_settings()
 
@@ -21,7 +29,7 @@ if _settings.sentry_dsn_worker:
 
 
 class WorkerSettings:
-    functions = [process_job, process_citation, process_source, process_quote]
+    functions = [process_job, process_citation, process_source, process_quote, process_proposition]
     redis_settings = RedisSettings.from_dsn(_settings.redis_url)
     on_startup = startup
     on_shutdown = shutdown

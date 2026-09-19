@@ -58,6 +58,7 @@ class FindingResponse(BaseModel):
     verdict: str
     confidence: float | None
     notes: list[str] = Field(default_factory=list)
+    rationale: str | None = None
     evidence: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
 
@@ -131,6 +132,7 @@ class FindingCreatedEvent(BaseModel):
     check: str
     verdict: str
     confidence: float | None
+    rationale: str | None = None
     created_at: datetime
 
 
