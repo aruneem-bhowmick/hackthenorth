@@ -445,7 +445,15 @@ export default function Home() {
         stream.close();
       });
     }
-    stream.onerror = () => setJobStatus("Connection interrupted — the latest saved review is still available.");
+    stream.onerror = () => {
+      setJobStatus("Connection interrupted — the latest saved review is still available.");
+      // The browser will keep retrying this SSE connection on its own. Without
+      // this, an error before a terminal event (job.completed/job.failed)
+      // left the 5s signal-refresh interval running forever from an idle tab
+      // — nothing else ever clears it — repeatedly polling one job's
+      // citations and eventually tripping Railway's edge rate limit.
+      if (signalRefreshTimer.current) clearInterval(signalRefreshTimer.current);
+    };
   }
 
   function chooseFile(event: ChangeEvent<HTMLInputElement>) {
